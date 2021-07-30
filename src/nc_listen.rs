@@ -1,15 +1,13 @@
-use anyhow::Context;
+use crate::errors::NcsError::*;
+use crate::*;
+use anyhow::{Context, Result};
 use log::debug;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::{Client, Method, Url};
-use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::{Arc, Mutex};
 use urlencoding::decode;
-// use std::cell::RefCell;
-// use std::rc::Rc;
-
-use crate::*;
 
 const NC_ROOT_PREFIX: &str = "/remote.php/dav/files/";
 pub const OCS_ROOT: &str = "/ocs/v2.php/apps/activity/api/v2/activity/all";
@@ -48,86 +46,97 @@ pub struct NCState {
     pub latest_activity_id: String,
 }
 
-pub async fn from_nc(nc_info: &NCInfo, target: &str) -> anyhow::Result<Entry> {
+pub async fn from_nc(nc_info: &NCInfo, target: &str) -> Result<Entry> {
     let target = add_head_slash(&target);
     let responses = comm_nc(nc_info, &target).await?;
+
+    let target_name = path2name(&target);
+    let target_name_without_slash = drop_slash(&target_name, &RE_HAS_LAST_SLASH);
+
+    debug!("target_name: {}", target_name);
 
     let target_res = responses
         .into_iter()
         .filter(|r| {
-            let a = drop_slash(&r.path, &RE_HAS_LAST_SLASH);
-            let b = drop_slash(&target, &RE_HAS_LAST_SLASH);
-            a == b
+            debug!("r_name: {}", &r.get_name());
+            drop_slash(r.get_name().as_str(), &RE_HAS_LAST_SLASH).as_str()
+                == &target_name_without_slash
         })
         .nth(0);
 
-    target_res.ok_or(anyhow!("Can not found target Entry."))
+    target_res.with_context(|| format!("Can not find target Entry."))
 }
 
-pub async fn from_nc_all(
-    nc_info: &NCInfo,
-    target: &str,
-) -> anyhow::Result<(String, HashMap<String, Entry>)> {
+pub async fn ncpath_is_file(nc_info: &NCInfo, target: &str) -> bool {
+    let entry_res = from_nc(nc_info, target).await;
+
+    if let Ok(entry) = entry_res {
+        entry.type_.is_file()
+    } else {
+        false
+    }
+}
+
+pub async fn correct_nc_path(nc_info: &NCInfo, target: &str) -> String {
+    let is_file = ncpath_is_file(nc_info, target).await;
+    if is_file {
+        drop_slash(target, &RE_HAS_LAST_SLASH)
+    } else {
+        let res = add_last_slash(target);
+        debug!("{}", res);
+        res
+    }
+}
+
+pub async fn get_etag_from_nc(nc_info: &NCInfo, target: &str) -> Option<String> {
+    let entry_res = from_nc(nc_info, target).await;
+
+    if_chain! {
+        if let Ok(entry) = entry_res;
+        if let EntryType::File { etag } = entry.type_;
+        then {
+            etag
+        } else {
+            None
+        }
+    }
+}
+
+pub async fn from_nc_all(nc_info: &NCInfo, target: &str) -> Result<ArcEntry> {
     let target = add_head_slash(&target);
     let top_entry = from_nc(nc_info, &target).await?;
-    let top_path = top_entry.path.clone();
+    let top_entry = Arc::new(Mutex::new(top_entry));
 
-    let mut book = HashMap::new();
-    book.insert(top_path.clone(), top_entry);
+    get_children_rec(nc_info, &top_entry, "").await?;
 
-    let mut stack = vec![top_path.clone()];
-    while let Some(parent_path) = stack.pop() {
-        get_children(nc_info, &parent_path, &mut book, &mut stack).await?;
-    }
-
-    Ok((top_path, book))
+    Ok(top_entry)
 }
 
-async fn get_children(
+#[async_recursion]
+async fn get_children_rec(
     nc_info: &NCInfo,
-    parent_path: &str,
-    book: &mut HashMap<String, Entry>,
-    stack: &mut Vec<String>,
-) -> anyhow::Result<()> {
-    if_chain! {
-        if let Some(p) = book.get(parent_path);
-        if p.type_.is_file();
-        then {
-            return Ok(());
-        }
-    }
-
-    let children_entries = comm_nc(nc_info, &parent_path)
+    parent_entry: &ArcEntry,
+    ancestor_path: &str,
+) -> Result<()> {
+    let parent_name = parent_entry.lock().map_err(|_| LockError)?.get_name();
+    let ancestor_path = format!("{}{}", ancestor_path, parent_name);
+    let children_entries = comm_nc(nc_info, &ancestor_path)
         .await?
         .into_iter()
-        .filter(|c| c.path != parent_path);
+        .filter(|c| c.get_name().as_str() != &parent_name);
 
-    let mut children = HashSet::new();
     for c in children_entries {
-        let path = c.path.clone();
-
-        if !c.type_.is_file() {
-            stack.push(path.clone());
-        }
-        book.insert(path.clone(), c);
-
-        children.insert(path);
-    }
-
-    if let Some(parent) = book.get_mut(parent_path) {
-        parent.type_ = EntryType::Directory { children };
+        let c = Arc::new(Mutex::new(c));
+        get_children_rec(nc_info, &c, &ancestor_path).await?;
+        Entry::append_child(parent_entry, c)?;
     }
 
     Ok(())
 }
 
-async fn comm_nc(nc_info: &NCInfo, target: &str) -> anyhow::Result<Vec<Entry>> {
-    /*
-    let host = fix_host(host);
-    let root_path = fix_root(root_path);
-    */
+async fn comm_nc(nc_info: &NCInfo, target: &str) -> Result<Vec<Entry>> {
     let target = add_head_slash(target);
-    // let target = drop_slash(target, &RE_HAS_HEAD_SLASH);
+    let target = drop_slash(&target, &RE_HAS_LAST_SLASH);
 
     let path = format!("{}{}", &nc_info.root_path, target)
         .split("/")
@@ -146,7 +155,7 @@ async fn comm_nc(nc_info: &NCInfo, target: &str) -> anyhow::Result<Vec<Entry>> {
         .await?;
 
     if !res.status().is_success() {
-        return Err(anyhow!("status: {}", res.status()));
+        return Err(BadStatusError(res.status().as_u16()).into());
     }
 
     let text = res.text_with_charset("utf-8").await?;
@@ -169,7 +178,6 @@ fn webdav_xml2responses(document: &roxmltree::Document, root_path: &str) -> Vec<
             }
 
             let mut name_w = None;
-            let mut path_w = None;
             let mut etag_w = None;
             let mut type_w = None;
 
@@ -179,9 +187,7 @@ fn webdav_xml2responses(document: &roxmltree::Document, root_path: &str) -> Vec<
                         if let Some(href) = m.text() {
                             let path = href.replace(&root_path, "");
                             let path = decode(&path).ok()?;
-                            let path_name = drop_slash(&path, &RE_HAS_LAST_SLASH);
-                            name_w = Some(path_name.split("/").last().unwrap_or("").to_string());
-                            path_w = Some(path_name);
+                            name_w = Some(path2name(&path));
                         }
                     }
                     "propstat" => {
@@ -195,9 +201,7 @@ fn webdav_xml2responses(document: &roxmltree::Document, root_path: &str) -> Vec<
                                         Some(ref s) if s != &"" => {
                                             Some(EntryType::File { etag: None })
                                         }
-                                        _ => Some(EntryType::Directory {
-                                            children: HashSet::new(),
-                                        }),
+                                        _ => Some(EntryType::Directory),
                                     };
                                 }
                                 _ => (),
@@ -209,38 +213,16 @@ fn webdav_xml2responses(document: &roxmltree::Document, root_path: &str) -> Vec<
             }
             if_chain! {
                 if let Some(name) = name_w;
-                if let Some(path) = path_w;
                 if let Some(etag) = etag_w;
                 if let Some(type_) = type_w;
                 then {
-                    let (name, path) = match &type_ {
-                        &EntryType::File {..} => (name, path),
-                        _ => (add_last_slash(&name), add_last_slash(&path)),
-                    };
-
-                    // ルートディレクトリに限らず、親ディレクトリとETagが一致する現象が存在
-                    // 一意性をもたせるのにETagは不十分そう
-                    /*
-                    let etag = if name == "" {
-                        "".to_string()
-                    } else {
-                        etag
-                    };
-                    */
-
                     let type_ = if let EntryType::File {..} = type_ {
                         EntryType::File { etag: Some(etag) }
                     } else {
                         type_
                     };
 
-                    Some(Entry {
-                        name,
-                        path,
-                        // etag,
-                        status: EntryStatus::NeedUpdate,
-                        type_,
-                    })
+                    Some(Entry::new(name, type_))
                 } else {
                     None
                 }
@@ -250,149 +232,95 @@ fn webdav_xml2responses(document: &roxmltree::Document, root_path: &str) -> Vec<
         .collect()
 }
 
-/*
-pub async fn make_entry_for_init(
-    target_path: &str,
-    nc_info: &NCInfo,
-    local_info: &LocalInfo,
-    book: &mut HashMap<String, Entry>,
-) -> anyhow::Result<()> {
-    let target_path = add_head_slash(target_path);
-    let re = Regex::new("(.*)/.*?$").unwrap();
-
-    if book.get(&target_path).is_none() {
-        let mut path = re.replace(&target_path, "$1").to_string();
-        while path.len() > 0 {
-            if book.get(&path).is_some() {
-                let (_, sub_book) = from_nc_all(nc_info, &path).await?;
-                sub_book.into_iter().for_each(|(k, v)| {
-                    book.insert(k, v);
-                });
-                break;
-            }
-
-            path = re.replace(&path, "$1").to_string();
-        }
-    }
-
-    if book.get(&target_path).is_none() {
-        return Err(anyhow!("No such target file."));
-    }
-    let mut target_entry = book.get_mut(&target_path).unwrap();
-
-    let dir_path = re.replace(&target_path, "$1").to_string();
-    let dir_path = format!("{}{}", local_info.root_path, dir_path);
-
-    fileope::create_dir_all(&dir_path)?;
-
-    if target_entry.type_.is_file() {
-        download_file(&mut target_entry, &nc_info, local_info).await?;
-    }
-
-    Ok(())
-}
-*/
-
-fn save_file<R: io::Read>(r: &mut R, path: &str, local_info: &LocalInfo) -> anyhow::Result<()> {
+fn save_file<R: io::Read>(r: &mut R, path: &str, local_info: &LocalInfo) -> Result<()> {
     let filename = format!("{}{}", local_info.root_path, path);
     fileope::save_file(r, &filename)?;
 
     Ok(())
 }
 
-fn create_dir_all(path: &str, local_info: &LocalInfo) -> anyhow::Result<()> {
+fn create_dir_all(path: &str, local_info: &LocalInfo) -> Result<()> {
     let dirname = format!("{}{}", local_info.root_path, path);
     fileope::create_dir_all(&dirname)?;
 
     Ok(())
 }
 
+fn touch_entry(path: &str, is_file: bool, local_info: &LocalInfo) -> Result<()> {
+    let path = format!("{}{}", local_info.root_path, path);
+    fileope::touch_entry(path, is_file)?;
+
+    Ok(())
+}
+
+fn move_entry(from_path: &str, to_path: &str, stash: bool, local_info: &LocalInfo) -> Result<()> {
+    let from_path = format!("{}{}", local_info.root_path, from_path);
+    let to_path = format!("{}{}", local_info.root_path, to_path);
+    fileope::move_entry(from_path, to_path, stash)?;
+
+    Ok(())
+}
+
+fn remove_entry(path: &str, stash: bool, local_info: &LocalInfo) -> Result<()> {
+    let path = format!("{}{}", local_info.root_path, path);
+    fileope::remove_entry(path, stash)?;
+
+    Ok(())
+}
+
+#[async_recursion(?Send)]
 pub async fn init_local_entries(
     nc_info: &NCInfo,
     local_info: &LocalInfo,
-    book: &mut HashMap<String, Entry>,
-) -> anyhow::Result<()> {
-    let paths = book
-        .iter()
-        .map(|(k, v)| (k.clone(), v.type_.is_file()))
-        .collect::<Vec<_>>();
-    for (p, is_file) in paths {
-        if is_file {
-            init_local_file(&p, nc_info, local_info, book).await?;
-        } else {
-            init_local_dir(&p, local_info, book)?;
+    entry: &ArcEntry,
+    ancestor_path: &str,
+) -> Result<()> {
+    let mut entry_ref = entry.lock().map_err(|_| LockError)?;
+
+    if entry_ref.status == EntryStatus::UpToDate {
+        return Ok(());
+    }
+
+    let full_path = format!("{}{}", ancestor_path, entry_ref.get_name());
+    match &entry_ref.type_ {
+        &EntryType::Directory => {
+            create_dir_all(&full_path, local_info)?;
+            entry_ref.status = EntryStatus::UpToDate;
+            for c in entry_ref.children.values() {
+                init_local_entries(nc_info, local_info, c, &full_path).await?;
+            }
+        }
+        &EntryType::File { .. } => {
+            create_dir_all(ancestor_path, local_info)?;
+            let res =
+                download_file_in_rec(nc_info, local_info, &mut entry_ref, ancestor_path).await;
+            match res {
+                Ok(()) => {
+                    entry_ref.status = EntryStatus::UpToDate;
+                }
+                Err(e) => {
+                    entry_ref.status = EntryStatus::Error;
+                    return Err(e);
+                }
+            }
         }
     }
-    Ok(())
-}
-
-pub fn init_local_dir(
-    target_path: &str,
-    local_info: &LocalInfo,
-    book: &mut HashMap<String, Entry>,
-) -> anyhow::Result<()> {
-    let e_w = book.get_mut(target_path);
-    if e_w.is_none() {
-        return Err(anyhow!("{} : No such nc entry.", target_path));
-    }
-    let e = e_w.unwrap();
-
-    if e.status == EntryStatus::UpToDate {
-        return Ok(());
-    }
-
-    create_dir_all(e.path.as_str(), local_info)?;
-    let parent_name_w = e.get_parent_name();
-    e.status = EntryStatus::UpToDate;
-
-    if let Some(parent_name) = parent_name_w {
-        init_local_dir(&parent_name, local_info, book)?;
-    }
 
     Ok(())
 }
 
-pub async fn init_local_file(
-    target_path: &str,
+async fn download_file_raw(
     nc_info: &NCInfo,
     local_info: &LocalInfo,
-    book: &mut HashMap<String, Entry>,
-) -> anyhow::Result<()> {
-    let e_w = book.get_mut(target_path);
-    if e_w.is_none() {
-        return Err(anyhow!("{} : No such nc entry.", target_path));
-    }
-    let e = e_w.unwrap();
-
-    if e.status == EntryStatus::UpToDate {
-        return Ok(());
-    }
-
-    if !e.type_.is_file() {
-        return Err(anyhow!("Not File."));
-    }
-
-    let parent_name = e.get_parent_name().ok_or(anyhow!("Invalid File."))?;
-
-    create_dir_all(&parent_name, local_info)?;
-    download_file(e, nc_info, local_info).await?;
-    e.status = EntryStatus::UpToDate;
-    init_local_dir(&parent_name, local_info, book)?;
-
-    Ok(())
-}
-
-async fn download_file(
-    target: &mut Entry,
-    nc_info: &NCInfo,
-    local_info: &LocalInfo,
-) -> anyhow::Result<()> {
-    if !target.type_.is_file() {
+    entry: &mut Entry,
+    full_path: &str,
+) -> Result<()> {
+    if entry.type_.is_dir() {
         return Err(anyhow!("Not file entry!!"));
     }
 
     let mut url = Url::parse(&nc_info.host)?;
-    let path_v = format!("{}{}", nc_info.root_path, target.path)
+    let path_v = format!("{}{}", nc_info.root_path, full_path)
         .split("/")
         .map(|v| v.to_string())
         .collect::<Vec<String>>();
@@ -407,20 +335,55 @@ async fn download_file(
     let new_etag = data_res
         .headers()
         .get("ETag")
-        .ok_or(anyhow!("Can't get new etag."))
+        .with_context(|| format!("Can't get new etag."))
         .and_then(|v| v.to_str().with_context(|| "Can't get new etag."))
         .map(|v| v.to_string().replace("\"", ""))?;
-    target.type_ = EntryType::File {
+    entry.type_ = EntryType::File {
         etag: Some(new_etag),
     };
 
     let bytes = data_res.bytes().await?;
-    save_file(&mut bytes.as_ref(), target.path.as_str(), local_info)?;
+    save_file(&mut bytes.as_ref(), full_path, local_info)?;
 
     Ok(())
 }
 
-pub async fn get_latest_activity_id(nc_info: &NCInfo) -> anyhow::Result<String> {
+async fn download_file_in_rec(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    entry: &mut Entry,
+    ancestor_path: &str,
+) -> Result<()> {
+    let full_path = format!("{}{}", ancestor_path, entry.get_name());
+
+    download_file_raw(nc_info, local_info, entry, &full_path).await
+}
+
+pub async fn download_file_with_check_etag(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    entry: &ArcEntry,
+) -> Result<()> {
+    let full_path = Entry::get_path(entry)?;
+
+    let nc_etag = get_etag_from_nc(nc_info, &full_path).await;
+
+    {
+        let mut entry_ref = entry.lock().map_err(|_| LockError)?;
+        if_chain! {
+            if let Some(etag) = nc_etag;
+            if entry_ref.type_ != EntryType::File { etag: Some(etag) };
+            then {
+                debug!("Need to download.");
+                download_file_raw(nc_info, local_info, &mut entry_ref, &full_path).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn get_latest_activity_id(nc_info: &NCInfo) -> Result<String> {
     let mut url = Url::parse(&nc_info.host)?;
     let path_v = OCS_ROOT
         .split("/")
@@ -437,7 +400,7 @@ pub async fn get_latest_activity_id(nc_info: &NCInfo) -> anyhow::Result<String> 
 
     res.headers()
         .get("X-Activity-First-Known")
-        .ok_or(anyhow!("Can't get latest activity id."))
+        .with_context(|| format!("Can't get latest activity id."))
         .and_then(|v| v.to_str().with_context(|| "Can't get latest activity id."))
         .map(|v| v.to_string())
 }
@@ -450,10 +413,7 @@ pub enum NCEvent {
     Move(String, String),
 }
 
-pub async fn get_ncevents(
-    nc_info: &NCInfo,
-    nc_state: &mut NCState,
-) -> anyhow::Result<Vec<NCEvent>> {
+pub async fn get_ncevents(nc_info: &NCInfo, nc_state: &mut NCState) -> Result<Vec<NCEvent>> {
     let mut url = Url::parse(&nc_info.host)?;
     let path_v = OCS_ROOT
         .split("/")
@@ -477,20 +437,20 @@ pub async fn get_ncevents(
         if s.as_u16() == 304 {
             return Ok(vec![]);
         } else {
-            return Err(anyhow!("status: {}", s));
+            return Err(BadStatusError(s.as_u16()).into());
         }
     }
 
     let latest_activity_id = res
         .headers()
         .get("X-Activity-Last-Given")
-        .ok_or(anyhow!("Can't get latest activity id."))
+        .with_context(|| format!("Can't get latest activity id."))
         .and_then(|v| v.to_str().with_context(|| "Can't get latest activity id."))
         .map(|v| v.to_string())?;
 
     let text = res.text_with_charset("utf-8").await?;
 
-    debug!("{}", text);
+    // debug!("{}", text);
 
     let document: roxmltree::Document = roxmltree::Document::parse(&text)?;
     let responses = ncevents_xml2responses(&document)?;
@@ -511,13 +471,13 @@ enum ActivityType {
     FileDeleted,
 }
 
-fn ncevents_xml2responses(document: &roxmltree::Document) -> anyhow::Result<Vec<NCEvent>> {
+fn ncevents_xml2responses(document: &roxmltree::Document) -> Result<Vec<NCEvent>> {
     let data = document
         .root_element()
         .children()
         .filter(|n| n.tag_name().name() == "data")
         .nth(0)
-        .ok_or(anyhow!("Invalid XML."))?;
+        .with_context(|| InvalidXMLError)?;
 
     let res = data
         .children()
@@ -586,10 +546,12 @@ fn ncevents_xml2responses(document: &roxmltree::Document) -> anyhow::Result<Vec<
                 }
             }
 
+            /*
             debug!(
                 "{:?} {:?} {:?} {:?}",
                 activity_type, files, new_files, old_files
             );
+            */
 
             match activity_type {
                 Some(ActivityType::FileCreated) => {
@@ -618,30 +580,215 @@ fn ncevents_xml2responses(document: &roxmltree::Document) -> anyhow::Result<Vec<
     Ok(res)
 }
 
-/*
-
-// Rc使いたいRc使いたいRc使いたい(魂の叫び)
-// マルチスレッドの文脈がありえるのでHashMapで耐えます...
-fn update_tree(nc_events: Vec<NCEvent>, book: &mut HashMap<String, Entry>, update_cands: &mut HashSet<String>) -> anyhow::Result<()> {
-    for event in nc_events.into_iter() {
-        match event {
-            NCEvent::Create(path) => todo!(),
-            NCEvent::Delete(path) => todo!(),
-            NCEvent::Modify(path) => {
-                if let Some(entry) = book.get_mut(path) {
-                    entry.status = EntryStatus::NeedUpdate;
-                } else {
+fn touch_targets(
+    update_targets: Vec<(WeakEntry, EntryStatus)>,
+    local_info: &LocalInfo,
+) -> anyhow::Result<()> {
+    for (target, new_status) in update_targets.into_iter() {
+        if let Some(e) = target.upgrade() {
+            let path = Entry::get_path(&e)?;
+            let mut e_ref = e.lock().map_err(|_| LockError)?;
+            let res = touch_entry(&path, e_ref.type_.is_file(), local_info);
+            match res {
+                Ok(_) => {
+                    e_ref.status = new_status;
+                }
+                Err(er) => {
+                    e_ref.status = EntryStatus::Error;
+                    // return Err(e);
+                    debug!("{}", er);
                 }
             }
-            NCEvent::Move(from_path, to_path) => todo!(),
         }
     }
+
     Ok(())
 }
 
-fn insert_entry(book: &mut HashMap<String, Entry>, ) -> anyhow::Result<()> {
-    Ok(())
+pub async fn update_tree(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    nc_events: Vec<NCEvent>,
+    root_entry: &ArcEntry,
+    stash: bool,
+) -> Result<Vec<WeakEntry>> {
+    let mut download_targets = Vec::new();
+
+    for event in nc_events.into_iter() {
+        {
+            let root_ref = root_entry.lock().map_err(|_| LockError)?;
+            debug!("\n{}", root_ref.get_tree());
+        }
+
+        match event {
+            NCEvent::Create(path) => {
+                debug!("Create {}", path);
+                let path = correct_nc_path(nc_info, &path).await;
+                if Entry::get(root_entry, &path)?.is_some() {
+                    continue;
+                }
+                let name = path2name(&path);
+                let type_ = EntryType::guess_from_name(&name);
+                let new_entry = Arc::new(Mutex::new(Entry::new(name, type_)));
+                let new_entry_w = Arc::downgrade(&new_entry);
+                download_targets.push(new_entry_w);
+                let update_targets =
+                    Entry::append(root_entry, &path, new_entry, AppendMode::Create, false)?;
+                touch_targets(update_targets, local_info)?;
+            }
+            NCEvent::Delete(mut path) => {
+                debug!("Delete {}", path);
+                // let path = correct_nc_path(nc_info, &path).await?;
+                let mut root_ref = root_entry.lock().map_err(|_| LockError)?;
+                let res = root_ref.pop(&path)?;
+                if res.is_none() {
+                    path = add_last_slash(&path);
+                    let _ = root_ref.pop(&path)?;
+                }
+                remove_entry(&path, stash, local_info)?;
+            }
+            NCEvent::Modify(path) => {
+                debug!("Modify {}", path);
+                let path = correct_nc_path(nc_info, &path).await;
+                let mut w = Entry::get(root_entry, &path)?;
+                if w.is_none() {
+                    let p = add_last_slash(&path);
+                    debug!("{} @ Modify", p);
+                    let v = Entry::get(root_entry, &p)?;
+                    let v = if v.is_none() {
+                        let p = drop_slash(&path, &RE_HAS_LAST_SLASH);
+                        debug!("{} @ Modify", p);
+                        Entry::get(root_entry, &p)?
+                    } else {
+                        v
+                    }
+                    .with_context(|| InvalidPathError(format!("{}", path)))?;
+                    let v_arc = v
+                        .upgrade()
+                        .with_context(|| InvalidPathError(format!("{}", path)))?;
+                    debug!("try_fix_entry_type@modify");
+                    let _ = try_fix_entry_type(&v_arc, &path, nc_info, local_info).await?;
+                    w = Some(v);
+                }
+                if_chain! {
+                    if let Some(w) = w;
+                    if let Some(e) = w.upgrade();
+                    then {
+                        let is_file = {
+                            let mut e_ref = e.lock().map_err(|_| LockError)?;
+                            e_ref.status = EntryStatus::NeedUpdate;
+                            e_ref.type_.is_file()
+                        };
+                        if is_file {
+                            download_targets.push(Arc::downgrade(&e));
+                        }
+                    }
+                }
+            }
+            NCEvent::Move(mut from_path, to_path) => {
+                debug!("Move {} => {}", from_path, to_path);
+                let to_path = correct_nc_path(nc_info, &to_path).await;
+                let target = {
+                    let mut root_ref = root_entry.lock().map_err(|_| LockError)?;
+                    let res = root_ref.pop(&from_path)?;
+                    if res.is_some() {
+                        res
+                    } else {
+                        from_path = add_last_slash(&from_path);
+                        root_ref.pop(&from_path)?
+                    }
+                }
+                .with_context(|| InvalidPathError(format!("{} => {}", from_path, to_path)))?;
+
+                /*
+                debug!("try_fix_entry_type@move");
+                let fixed_to_path = fix_and_concat_nc_path(&to_path, root_entry, &target)?;
+                let have_to_download =
+                    try_fix_entry_type(&target, &fixed_to_path, nc_info, local_info).await?;
+                if have_to_download {
+                    let w = Arc::downgrade(&target);
+                    download_targets.push(w);
+                }
+                */
+
+                let update_targets =
+                    Entry::append(root_entry, &to_path, target.clone(), AppendMode::Move, true)?;
+                touch_targets(update_targets, local_info)?;
+                let res = move_entry(&from_path, &to_path, stash, local_info);
+                match res {
+                    Err(er) => {
+                        let mut t_ref = target.lock().map_err(|_| LockError)?;
+                        t_ref.status = EntryStatus::Error;
+                        // return Err(e);
+                        debug!("{}", er);
+                    }
+                    Ok(_) => {
+                        debug!("try_fix_entry_type@move");
+                        let path = Entry::get_path(&target)?;
+                        let have_to_download =
+                            try_fix_entry_type(&target, &path, nc_info, local_info).await?;
+                        if have_to_download {
+                            let w = Arc::downgrade(&target);
+                            download_targets.push(w);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(download_targets)
 }
 
-fn remove_entry(book: )
+// Nextcloud API がクソすぎるのために必要...かも...
+/*
+fn fix_and_concat_nc_path(
+    nc_path: &str,
+    root_entry: &ArcEntry,
+    target: &ArcEntry,
+) -> Result<String> {
+    let already_exist = Entry::get(root_entry, add_last_slash(nc_path).as_str())?.is_some();
+
+    if already_exist {
+        let t = drop_slash(nc_path, &RE_HAS_LAST_SLASH);
+        let target_ref = target.lock().map_err(|_| LockError)?;
+        Ok(format!("{}/{}", t, target_ref.get_name()))
+    } else {
+        Ok(nc_path.to_string())
+    }
+}
 */
+
+async fn try_fix_entry_type(
+    target: &ArcEntry,
+    path: &str,
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+) -> Result<bool> {
+    // let path = Entry::get_path(target)?; // @Move, target has no parent.
+    let res = from_nc(nc_info, path).await;
+
+    let nc_entry = match res {
+        Ok(entry) => entry,
+        Err(_) => return Ok(false),
+    };
+
+    let mut target_ref = target.lock().map_err(|_| LockError)?;
+    if target_ref.type_.is_same_type(&nc_entry.type_) {
+        return Ok(false);
+    }
+
+    target_ref.status = EntryStatus::NeedUpdate;
+
+    target_ref.type_ = if target_ref.type_.is_file() {
+        EntryType::Directory
+    } else {
+        EntryType::File { etag: None }
+    };
+
+    let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
+    debug!("{}", path);
+    remove_entry(&path, false, local_info)?;
+    touch_entry(&path, target_ref.type_.is_file(), local_info)?;
+
+    Ok(target_ref.type_.is_file())
+}
