@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+#[allow(unused_imports)]
+use log::{debug, info};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
@@ -83,13 +85,7 @@ pub fn fix_root(root_path: &str) -> String {
 
 pub fn path2name(path: &str) -> String {
     let p = drop_slash(path, &RE_HAS_LAST_SLASH);
-    let raw_name = p.split("/").last().unwrap_or("").to_string();
-
-    if RE_HAS_LAST_SLASH.is_match(path) {
-        format!("{}/", raw_name)
-    } else {
-        raw_name
-    }
+    p.split("/").last().unwrap_or("").to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +106,7 @@ impl EntryType {
         !self.is_file()
     }
 
+    /*
     pub fn guess_from_name(name: &str) -> Self {
         if RE_HAS_LAST_SLASH.is_match(name) {
             Self::Directory
@@ -117,6 +114,7 @@ impl EntryType {
             Self::File { etag: None }
         }
     }
+    */
 
     pub fn get_etag(&self) -> String {
         match self {
@@ -163,32 +161,6 @@ pub struct Entry {
 pub type ArcEntry = Arc<Mutex<Entry>>;
 pub type WeakEntry = Weak<Mutex<Entry>>;
 
-/*
-impl PartialEq for Entry {
-    fn eq(&self, other: &Self) -> bool {
-        if_chain! {
-            if let EntryType::File { etag: ref self_etag } = self.type_;
-            if let EntryType::File { etag: ref other_etag } = other.type_;
-            then {
-                if_chain! {
-                    if let Some(self_etag) = self_etag;
-                    if let Some(other_etag) = other_etag;
-                    then {
-                        self.path_eq(other).unwrap() && self_etag == other_etag
-                    } else {
-                        false
-                    }
-                }
-            } else {
-                self.path_eq(other).unwrap()
-            }
-        }
-    }
-}
-
-impl Eq for Entry {}
-*/
-
 impl fmt::Display for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let EntryType::File { ref etag } = self.type_ {
@@ -198,8 +170,6 @@ impl fmt::Display for Entry {
         }
     }
 }
-
-// static RE_GET_PARENT: Lazy<Regex> = Lazy::new(|| Regex::new("(.*/).*?$").unwrap());
 
 impl Entry {
     pub fn new(name: String, type_: EntryType) -> Self {
@@ -222,19 +192,14 @@ impl Entry {
         format!("{}{}", self.name, s)
     }
 
+    pub fn get_raw_name(&self) -> String {
+        self.name.clone()
+    }
+
     pub fn set_name(&mut self, new_name: &str) {
         let new_name = drop_slash(new_name, &RE_HAS_LAST_SLASH);
         self.name = new_name;
     }
-
-    /*
-    pub fn path_eq(&self, other: &Self) -> Result<bool> {
-        let self_path = self.get_path()?;
-        let other_path = other.get_path()?;
-
-        Ok(self_path == other_path)
-    }
-    */
 
     pub fn is_root(&self) -> bool {
         self.name == "" && self.parent.is_none()
@@ -261,7 +226,7 @@ impl Entry {
         }
         parent_names.reverse();
         let entry = entry.lock().map_err(|_| LockError)?;
-        Ok(format!("{}{}", parent_names.join(""), entry.get_name()))
+        Ok(format!("{}{}", parent_names.join(""), entry.get_raw_name()))
     }
 
     pub fn append_child(parent: &ArcEntry, child: ArcEntry) -> Result<()> {
@@ -269,7 +234,7 @@ impl Entry {
         let child_name = {
             let mut child_ref = child.lock().map_err(|_| LockError)?;
             child_ref.parent = Some(weak_parent);
-            child_ref.get_name()
+            child_ref.get_raw_name()
         };
         parent
             .lock()
@@ -305,26 +270,25 @@ impl Entry {
         }
     }
 
-    fn prepare_path_vec(path: &str) -> Vec<String> {
-        let v = path.split("/").enumerate().collect::<Vec<_>>();
-        let len = v.len();
-        let mut path_vec = Vec::with_capacity(len);
-
-        for (i, name) in v.into_iter() {
-            let name = if i < len - 1 {
-                format!("{}/", name)
-            } else {
-                name.to_string()
-            };
-            path_vec.push(name);
+    pub fn prepare_path_vec(path: &str) -> Vec<String> {
+        let path = drop_slash(path, &RE_HAS_LAST_SLASH);
+        let mut path_vec = path
+            .split("/")
+            .map(|s| s.to_string())
+            .collect::<Vec<String>>();
+        if path_vec.len() == 0 {
+            path_vec.push("".to_string());
         }
         path_vec.reverse();
 
+        path_vec
+        /*
         if &path_vec[0] == "" {
-            (&path_vec[1..]).iter().map(|s| s.to_string()).collect()
+            path_vec[1..].to_vec()
         } else {
             path_vec
         }
+        */
     }
 
     pub fn get(this: &ArcEntry, path: &str) -> Result<Option<WeakEntry>> {
@@ -341,7 +305,7 @@ impl Entry {
         }
 
         if path_vec.len() == 1 {
-            if path_vec[0] == "/" {
+            if path_vec[0] == "" {
                 return Ok(Some(root_w));
             } else {
                 return Ok(None);
@@ -353,7 +317,7 @@ impl Entry {
 
     fn get_rec(&self, mut path_vec: Vec<String>) -> Result<Option<WeakEntry>> {
         let name_w = path_vec.pop();
-        if name_w.is_none() || self.get_name() != name_w.unwrap() {
+        if name_w.is_none() || self.get_raw_name() != name_w.unwrap() {
             return Ok(None);
         }
 
@@ -392,7 +356,7 @@ impl Entry {
 
     fn pop_rec(&mut self, mut path_vec: Vec<String>) -> Result<Option<ArcEntry>> {
         let name_w = path_vec.pop();
-        if name_w.is_none() || self.get_name() != name_w.unwrap() {
+        if name_w.is_none() || self.get_raw_name() != name_w.unwrap() {
             return Ok(None);
         }
 
@@ -415,7 +379,7 @@ impl Entry {
             }
         } else {
             // pop target
-            let entry = self.children.remove(&path_vec[len - 1]);
+            let entry = self.children.remove(&path_vec[0]);
 
             if let Some(entry) = entry {
                 {
@@ -435,7 +399,7 @@ impl Entry {
         entry: ArcEntry,
         append_mode: AppendMode,
         overwrite: bool,
-    ) -> Result<Vec<(WeakEntry, EntryStatus)>> {
+    ) -> Result<Vec<WeakEntry>> {
         {
             let root_ref = root_entry.lock().map_err(|_| LockError)?;
             if !root_ref.is_root() {
@@ -443,10 +407,10 @@ impl Entry {
             }
         }
 
-        let already_exist = Entry::get(root_entry, add_last_slash(path).as_str())?.is_some()
-            || Entry::get(root_entry, path)?.is_some();
+        let target_parent_cand =
+            Entry::get(root_entry, drop_slash(path, &RE_HAS_LAST_SLASH).as_str())?;
 
-        if !overwrite && already_exist {
+        if !overwrite && target_parent_cand.is_some() {
             return Err(anyhow!("Already Exist!!"));
         }
 
@@ -454,21 +418,15 @@ impl Entry {
 
         {
             let mut entry_ref = entry.lock().map_err(|_| LockError)?;
-            let entry_name = entry_ref.get_name();
+            let entry_name = entry_ref.get_raw_name();
             if &path_vec[0] != &entry_name {
                 match append_mode {
                     AppendMode::Move => {
                         if_chain! {
-                            // if entry_ref.type_.is_file();
-                            if already_exist;
-                            if EntryType::guess_from_name(path).is_dir();
-                            /*
-                            if let root_ref = root_entry.lock().map_err(|_| LockError)?;
-                            if let Some(w) = root_ref.get(format!("{}/", path).as_str())?;
+                            if let Some(w) = target_parent_cand;
                             if let Some(e) = w.upgrade();
-                            if let e_ref = e.lock().map_err(|_| LockError)?;
+                            let e_ref = e.lock().map_err(|_| LockError)?;
                             if e_ref.type_.is_dir();
-                            */
                             then {
                                 path_vec.insert(0, entry_name);
                             } else {
@@ -497,13 +455,13 @@ impl Entry {
         parent_entry: &ArcEntry,
         mut path_vec: Vec<String>,
         entry: ArcEntry,
-        new_local_entries: &mut Vec<(WeakEntry, EntryStatus)>,
+        new_local_entries: &mut Vec<WeakEntry>,
         append_mode: AppendMode,
     ) -> Result<()> {
         let name_w = path_vec.pop();
         {
             let parent_ref = parent_entry.lock().map_err(|_| LockError)?;
-            let parent_name = parent_ref.get_name();
+            let parent_name = parent_ref.get_raw_name();
             if name_w.is_none() || &parent_name != name_w.unwrap().as_str() {
                 return Err(InvalidPathError(format!("{}", parent_name)).into());
             }
@@ -524,7 +482,7 @@ impl Entry {
                 e
             } else {
                 let new_entry = Arc::new(Mutex::new(Self::new(name, EntryType::Directory)));
-                new_local_entries.push((Arc::downgrade(&new_entry), EntryStatus::UpToDate));
+                new_local_entries.push(Arc::downgrade(&new_entry));
                 Self::append_child(parent_entry, new_entry.clone())?;
                 new_entry
             };
@@ -540,12 +498,8 @@ impl Entry {
             }
         } else {
             // append target
-            {
-                let mut entry_ref = entry.lock().map_err(|_| LockError)?;
-                entry_ref.status = EntryStatus::NeedUpdate;
-            }
             if append_mode == AppendMode::Create {
-                new_local_entries.push((Arc::downgrade(&entry), EntryStatus::NeedUpdate));
+                new_local_entries.push(Arc::downgrade(&entry));
             }
             Self::append_child(parent_entry, entry)?;
 
@@ -558,4 +512,27 @@ impl Entry {
 pub enum AppendMode {
     Create,
     Move,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+
+    #[test]
+    fn path_vec_test1() {
+        let path = "/hoge/fuga/bar/test.md";
+
+        let v = Entry::prepare_path_vec(path);
+        assert_eq!(&v, &["test.md", "bar", "fuga", "hoge", ""]);
+
+        let path = "/hoge/fuga/bar/test/";
+
+        let v = Entry::prepare_path_vec(path);
+        assert_eq!(&v, &["test", "bar", "fuga", "hoge", ""]);
+
+        let path = "/";
+
+        let v = Entry::prepare_path_vec(path);
+        assert_eq!(&v, &[""]);
+    }
 }

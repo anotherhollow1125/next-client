@@ -1,7 +1,7 @@
 use crate::errors::NcsError::*;
 use crate::*;
 use anyhow::{Context, Result};
-use log::debug;
+use log::{debug, info};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::{Client, Method, Url};
@@ -59,8 +59,7 @@ pub async fn from_nc(nc_info: &NCInfo, target: &str) -> Result<Entry> {
         .into_iter()
         .filter(|r| {
             debug!("r_name: {}", &r.get_name());
-            drop_slash(r.get_name().as_str(), &RE_HAS_LAST_SLASH).as_str()
-                == &target_name_without_slash
+            r.get_raw_name().as_str() == &target_name_without_slash
         })
         .nth(0);
 
@@ -77,6 +76,7 @@ pub async fn ncpath_is_file(nc_info: &NCInfo, target: &str) -> bool {
     }
 }
 
+/*
 pub async fn correct_nc_path(nc_info: &NCInfo, target: &str) -> String {
     let is_file = ncpath_is_file(nc_info, target).await;
     if is_file {
@@ -87,6 +87,7 @@ pub async fn correct_nc_path(nc_info: &NCInfo, target: &str) -> String {
         res
     }
 }
+*/
 
 pub async fn get_etag_from_nc(nc_info: &NCInfo, target: &str) -> Option<String> {
     let entry_res = from_nc(nc_info, target).await;
@@ -494,6 +495,10 @@ fn ncevents_xml2responses(document: &roxmltree::Document) -> Result<Vec<NCEvent>
             for m in n.children() {
                 if m.tag_name().name() == "type" {
                     activity_type = match m.text() {
+                        // file_restored must be distinguished from file_created!!!!
+                        // Because if you restored folder, its children will not be restored
+                        // when file_restored be dealed as file_created.
+                        // on hold.
                         Some("file_created") | Some("file_restored") => {
                             Some(ActivityType::FileCreated)
                         }
@@ -553,6 +558,8 @@ fn ncevents_xml2responses(document: &roxmltree::Document) -> Result<Vec<NCEvent>
             );
             */
 
+            old_files.sort_by(|a, b| a.len().cmp(&b.len()).reverse());
+
             match activity_type {
                 Some(ActivityType::FileCreated) => {
                     files.into_iter().map(|f| NCEvent::Create(f)).collect()
@@ -580,18 +587,15 @@ fn ncevents_xml2responses(document: &roxmltree::Document) -> Result<Vec<NCEvent>
     Ok(res)
 }
 
-fn touch_targets(
-    update_targets: Vec<(WeakEntry, EntryStatus)>,
-    local_info: &LocalInfo,
-) -> anyhow::Result<()> {
-    for (target, new_status) in update_targets.into_iter() {
+fn touch_targets(update_targets: Vec<WeakEntry>, local_info: &LocalInfo) -> anyhow::Result<()> {
+    for target in update_targets.into_iter() {
         if let Some(e) = target.upgrade() {
             let path = Entry::get_path(&e)?;
             let mut e_ref = e.lock().map_err(|_| LockError)?;
             let res = touch_entry(&path, e_ref.type_.is_file(), local_info);
             match res {
                 Ok(_) => {
-                    e_ref.status = new_status;
+                    e_ref.status = EntryStatus::UpToDate;
                 }
                 Err(er) => {
                     e_ref.status = EntryStatus::Error;
@@ -623,34 +627,44 @@ pub async fn update_tree(
         match event {
             NCEvent::Create(path) => {
                 debug!("Create {}", path);
-                let path = correct_nc_path(nc_info, &path).await;
+                // let path = correct_nc_path(nc_info, &path).await;
+                let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
                 if Entry::get(root_entry, &path)?.is_some() {
                     continue;
                 }
                 let name = path2name(&path);
-                let type_ = EntryType::guess_from_name(&name);
+                let type_ = if ncpath_is_file(nc_info, &path).await {
+                    EntryType::File { etag: None }
+                } else {
+                    EntryType::Directory
+                };
                 let new_entry = Arc::new(Mutex::new(Entry::new(name, type_)));
                 let new_entry_w = Arc::downgrade(&new_entry);
                 download_targets.push(new_entry_w);
                 let update_targets =
                     Entry::append(root_entry, &path, new_entry, AppendMode::Create, false)?;
-                touch_targets(update_targets, local_info)?;
+                let filop_res = touch_targets(update_targets, local_info);
+                if let Err(e) = filop_res {
+                    info!("{}", e);
+                }
             }
-            NCEvent::Delete(mut path) => {
+            NCEvent::Delete(path) => {
                 debug!("Delete {}", path);
                 // let path = correct_nc_path(nc_info, &path).await?;
+                let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
                 let mut root_ref = root_entry.lock().map_err(|_| LockError)?;
-                let res = root_ref.pop(&path)?;
-                if res.is_none() {
-                    path = add_last_slash(&path);
-                    let _ = root_ref.pop(&path)?;
+                let _ = root_ref.pop(&path)?;
+                let filop_res = remove_entry(&path, stash, local_info);
+                if let Err(e) = filop_res {
+                    info!("{}", e);
                 }
-                remove_entry(&path, stash, local_info)?;
             }
             NCEvent::Modify(path) => {
                 debug!("Modify {}", path);
-                let path = correct_nc_path(nc_info, &path).await;
-                let mut w = Entry::get(root_entry, &path)?;
+                // let path = correct_nc_path(nc_info, &path).await;
+                let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
+                let w = Entry::get(root_entry, &path)?;
+                /*
                 if w.is_none() {
                     let p = add_last_slash(&path);
                     debug!("{} @ Modify", p);
@@ -670,12 +684,14 @@ pub async fn update_tree(
                     let _ = try_fix_entry_type(&v_arc, &path, nc_info, local_info).await?;
                     w = Some(v);
                 }
+                */
                 if_chain! {
                     if let Some(w) = w;
                     if let Some(e) = w.upgrade();
                     then {
                         let is_file = {
                             let mut e_ref = e.lock().map_err(|_| LockError)?;
+                            debug!("NeedUpdate substituted.");
                             e_ref.status = EntryStatus::NeedUpdate;
                             e_ref.type_.is_file()
                         };
@@ -685,20 +701,24 @@ pub async fn update_tree(
                     }
                 }
             }
-            NCEvent::Move(mut from_path, to_path) => {
+            NCEvent::Move(from_path, to_path) => {
                 debug!("Move {} => {}", from_path, to_path);
-                let to_path = correct_nc_path(nc_info, &to_path).await;
-                let target = {
+                // let to_path = correct_nc_path(nc_info, &to_path).await;
+                let to_path = drop_slash(&to_path, &RE_HAS_LAST_SLASH);
+                let from_path = drop_slash(&from_path, &RE_HAS_LAST_SLASH);
+                let target_w = {
                     let mut root_ref = root_entry.lock().map_err(|_| LockError)?;
-                    let res = root_ref.pop(&from_path)?;
-                    if res.is_some() {
-                        res
-                    } else {
-                        from_path = add_last_slash(&from_path);
-                        root_ref.pop(&from_path)?
-                    }
+                    root_ref.pop(&from_path)?
                 }
-                .with_context(|| InvalidPathError(format!("{} => {}", from_path, to_path)))?;
+                .with_context(|| InvalidPathError(format!("{} => {}", from_path, to_path)));
+
+                let target = match target_w {
+                    Ok(v) => v,
+                    Err(e) => {
+                        info!("{}", e);
+                        continue;
+                    }
+                };
 
                 /*
                 debug!("try_fix_entry_type@move");
@@ -713,14 +733,19 @@ pub async fn update_tree(
 
                 let update_targets =
                     Entry::append(root_entry, &to_path, target.clone(), AppendMode::Move, true)?;
+
                 touch_targets(update_targets, local_info)?;
+
                 let res = move_entry(&from_path, &to_path, stash, local_info);
                 match res {
                     Err(er) => {
+                        /*
                         let mut t_ref = target.lock().map_err(|_| LockError)?;
                         t_ref.status = EntryStatus::Error;
                         // return Err(e);
                         debug!("{}", er);
+                        */
+                        info!("{}", er);
                     }
                     Ok(_) => {
                         debug!("try_fix_entry_type@move");
@@ -785,7 +810,7 @@ async fn try_fix_entry_type(
         EntryType::File { etag: None }
     };
 
-    let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
+    // let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
     debug!("{}", path);
     remove_entry(&path, false, local_info)?;
     touch_entry(&path, target_ref.type_.is_file(), local_info)?;
