@@ -5,6 +5,7 @@ use log::{debug, info};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::{Client, Method, Url};
+use std::collections::HashSet;
 use std::io;
 use std::sync::{Arc, Mutex};
 use urlencoding::decode;
@@ -75,19 +76,6 @@ pub async fn ncpath_is_file(nc_info: &NCInfo, target: &str) -> bool {
         false
     }
 }
-
-/*
-pub async fn correct_nc_path(nc_info: &NCInfo, target: &str) -> String {
-    let is_file = ncpath_is_file(nc_info, target).await;
-    if is_file {
-        drop_slash(target, &RE_HAS_LAST_SLASH)
-    } else {
-        let res = add_last_slash(target);
-        debug!("{}", res);
-        res
-    }
-}
-*/
 
 pub async fn get_etag_from_nc(nc_info: &NCInfo, target: &str) -> Option<String> {
     let entry_res = from_nc(nc_info, target).await;
@@ -161,8 +149,6 @@ async fn comm_nc(nc_info: &NCInfo, target: &str) -> Result<Vec<Entry>> {
 
     let text = res.text_with_charset("utf-8").await?;
 
-    // debug!("{}", text);
-
     let document: roxmltree::Document = roxmltree::Document::parse(&text)?;
     let responses = webdav_xml2responses(&document, &nc_info.root_path);
 
@@ -232,6 +218,135 @@ fn webdav_xml2responses(document: &roxmltree::Document, root_path: &str) -> Vec<
         .filter_map(|v| v)
         .collect()
 }
+
+// ==================== ↓ need refactoring ↓ ========================================
+// This section has a lot of duplicate code above.
+// but I'm reluctant to edit above code because it affect another section.
+
+struct PathAndIsDir {
+    path: String,
+    is_dir: bool,
+}
+
+// best effort method.
+async fn get_all_sub_path(nc_info: &NCInfo, target: &str) -> Vec<String> {
+    let mut paths = HashSet::new();
+    paths.insert(target.to_string());
+    get_all_sub_path_rec(nc_info, target, &mut paths).await;
+    let mut v = paths.into_iter().collect::<Vec<_>>();
+    v.sort_by(|a, b| a.len().cmp(&b.len()));
+
+    v
+}
+
+#[async_recursion]
+async fn get_all_sub_path_rec(nc_info: &NCInfo, target: &str, paths: &mut HashSet<String>) {
+    let parent_name = drop_slash(target, &RE_HAS_LAST_SLASH);
+    let res = comm_nc_for_path(nc_info, &parent_name).await;
+    let res = match res {
+        Ok(v) => v,
+        Err(e) => {
+            info!("{}", e);
+            return;
+        }
+    };
+    let children_pathandisdirs = res.into_iter().filter(|c| {
+        let child_path = drop_slash(&c.path, &RE_HAS_LAST_SLASH);
+        child_path != parent_name
+    });
+
+    for PathAndIsDir { path, is_dir } in children_pathandisdirs {
+        paths.insert(path.clone());
+        if is_dir {
+            get_all_sub_path_rec(nc_info, &path, paths).await;
+        }
+    }
+}
+
+async fn comm_nc_for_path(nc_info: &NCInfo, target: &str) -> Result<Vec<PathAndIsDir>> {
+    let target = add_head_slash(target);
+    let target = drop_slash(&target, &RE_HAS_LAST_SLASH);
+
+    let path = format!("{}{}", &nc_info.root_path, target)
+        .split("/")
+        .map(|v| v.to_string())
+        .collect::<Vec<String>>();
+
+    let mut url = Url::parse(&nc_info.host)?;
+    url.path_segments_mut().unwrap().extend(path);
+
+    let res = Client::new()
+        .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
+        .basic_auth(&nc_info.username, Some(&nc_info.password))
+        .header("Depth", "Infinity")
+        .body(WEBDAV_BODY)
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        return Err(BadStatusError(res.status().as_u16()).into());
+    }
+
+    let text = res.text_with_charset("utf-8").await?;
+
+    let document: roxmltree::Document = roxmltree::Document::parse(&text)?;
+    let responses = webdav_xml2paths(&document, &nc_info.root_path);
+
+    Ok(responses)
+}
+
+fn webdav_xml2paths(document: &roxmltree::Document, root_path: &str) -> Vec<PathAndIsDir> {
+    document
+        .root_element()
+        .children()
+        .map(|n| {
+            if n.tag_name().name() != "response" {
+                return None;
+            }
+
+            let mut path_w = None;
+            let mut is_dir_w = None;
+
+            for m in n.children() {
+                match m.tag_name().name() {
+                    "href" => {
+                        if let Some(href) = m.text() {
+                            let path = href.replace(&root_path, "");
+                            let path = decode(&path).ok()?;
+                            path_w = Some(path.to_string());
+                        }
+                    }
+                    "propstat" => {
+                        for d in m.descendants() {
+                            match d.tag_name().name() {
+                                "getcontenttype" => {
+                                    is_dir_w = match d.text() {
+                                        Some(ref s) if s != &"" => Some(false),
+                                        _ => Some(true),
+                                    };
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            if_chain! {
+                if let Some(path) = path_w;
+                if let Some(is_dir) = is_dir_w;
+                then {
+                    Some(PathAndIsDir { path: path.to_string(), is_dir })
+                } else {
+                    None
+                }
+            }
+        })
+        .filter_map(|v| v)
+        .collect()
+}
+
+// ==================== ↑ need refactoring ↑ ========================================
 
 fn save_file<R: io::Read>(r: &mut R, path: &str, local_info: &LocalInfo) -> Result<()> {
     let filename = format!("{}{}", local_info.root_path, path);
@@ -451,10 +566,8 @@ pub async fn get_ncevents(nc_info: &NCInfo, nc_state: &mut NCState) -> Result<Ve
 
     let text = res.text_with_charset("utf-8").await?;
 
-    // debug!("{}", text);
-
-    let document: roxmltree::Document = roxmltree::Document::parse(&text)?;
-    let responses = ncevents_xml2responses(&document)?;
+    let document: roxmltree::Document<'_> = roxmltree::Document::parse(&text)?;
+    let responses = ncevents_xml2responses(&document, nc_info).await?;
 
     nc_state.latest_activity_id = latest_activity_id;
 
@@ -468,11 +581,15 @@ static RE_OLDFILE: Lazy<Regex> = Lazy::new(|| Regex::new("^oldfile.*").unwrap())
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum ActivityType {
     FileCreated,
+    FileRestored,
     FileChanged,
     FileDeleted,
 }
 
-fn ncevents_xml2responses(document: &roxmltree::Document) -> Result<Vec<NCEvent>> {
+async fn ncevents_xml2responses(
+    document: &roxmltree::Document<'_>,
+    nc_info: &NCInfo,
+) -> Result<Vec<NCEvent>> {
     let data = document
         .root_element()
         .children()
@@ -480,109 +597,108 @@ fn ncevents_xml2responses(document: &roxmltree::Document) -> Result<Vec<NCEvent>
         .nth(0)
         .with_context(|| InvalidXMLError)?;
 
-    let res = data
-        .children()
-        .map(|n| {
-            if n.tag_name().name() != "element" {
-                return Vec::new();
+    let mut res = Vec::new();
+
+    for n in data.children() {
+        if n.tag_name().name() != "element" {
+            continue;
+        }
+
+        let mut files = Vec::new();
+        let mut new_files = Vec::new();
+        let mut old_files = Vec::new();
+        let mut activity_type = None;
+
+        for m in n.children() {
+            if m.tag_name().name() == "type" {
+                activity_type = match m.text() {
+                    Some("file_created") => Some(ActivityType::FileCreated),
+                    Some("file_restored") => Some(ActivityType::FileRestored),
+                    Some("file_changed") => Some(ActivityType::FileChanged),
+                    Some("file_deleted") => Some(ActivityType::FileDeleted),
+                    _ => None,
+                };
             }
+        }
 
-            let mut files = Vec::new();
-            let mut new_files = Vec::new();
-            let mut old_files = Vec::new();
-            let mut activity_type = None;
-
-            for m in n.children() {
-                if m.tag_name().name() == "type" {
-                    activity_type = match m.text() {
-                        // file_restored must be distinguished from file_created!!!!
-                        // Because if you restored folder, its children will not be restored
-                        // when file_restored be dealed as file_created.
-                        // on hold.
-                        Some("file_created") | Some("file_restored") => {
-                            Some(ActivityType::FileCreated)
-                        }
-                        Some("file_changed") => Some(ActivityType::FileChanged),
-                        Some("file_deleted") => Some(ActivityType::FileDeleted),
-                        _ => None,
-                    };
-                }
-            }
-
-            for m in n.descendants() {
-                match m.tag_name().name() {
-                    s if RE_FILE.is_match(s) => {
-                        for d in m.descendants() {
-                            match d.tag_name().name() {
-                                "path" => {
-                                    let path = d.text().unwrap_or("");
-                                    let path = add_head_slash(path);
-                                    files.push(path);
-                                }
-                                _ => (),
+        for m in n.descendants() {
+            match m.tag_name().name() {
+                s if RE_FILE.is_match(s) => {
+                    for d in m.descendants() {
+                        match d.tag_name().name() {
+                            "path" => {
+                                let path = d.text().unwrap_or("");
+                                let path = add_head_slash(path);
+                                files.push(path);
                             }
+                            _ => (),
                         }
                     }
-                    s if RE_NEWFILE.is_match(s) => {
-                        for d in m.descendants() {
-                            match d.tag_name().name() {
-                                "path" => {
-                                    let path = d.text().unwrap_or("");
-                                    let path = add_head_slash(path);
-                                    new_files.push(path);
-                                }
-                                _ => (),
+                }
+                s if RE_NEWFILE.is_match(s) => {
+                    for d in m.descendants() {
+                        match d.tag_name().name() {
+                            "path" => {
+                                let path = d.text().unwrap_or("");
+                                let path = add_head_slash(path);
+                                new_files.push(path);
                             }
+                            _ => (),
                         }
                     }
-                    s if RE_OLDFILE.is_match(s) => {
-                        for d in m.descendants() {
-                            match d.tag_name().name() {
-                                "path" => {
-                                    let path = d.text().unwrap_or("");
-                                    let path = add_head_slash(path);
-                                    old_files.push(path);
-                                }
-                                _ => (),
+                }
+                s if RE_OLDFILE.is_match(s) => {
+                    for d in m.descendants() {
+                        match d.tag_name().name() {
+                            "path" => {
+                                let path = d.text().unwrap_or("");
+                                let path = add_head_slash(path);
+                                old_files.push(path);
                             }
+                            _ => (),
                         }
                     }
-                    _ => (),
+                }
+                _ => (),
+            }
+        }
+
+        old_files.sort_by(|a, b| a.len().cmp(&b.len()).reverse());
+
+        let mut v = match activity_type {
+            Some(ActivityType::FileCreated) => {
+                files.into_iter().map(|f| NCEvent::Create(f)).collect()
+            }
+            Some(ActivityType::FileDeleted) => {
+                files.into_iter().map(|f| NCEvent::Delete(f)).collect()
+            }
+            Some(ActivityType::FileChanged) => {
+                if new_files.len() > 0 {
+                    let new_file = new_files.into_iter().nth(0).unwrap();
+                    old_files
+                        .into_iter()
+                        .map(|f| NCEvent::Move(f, new_file.clone()))
+                        .collect()
+                } else {
+                    files.into_iter().map(|f| NCEvent::Modify(f)).collect()
                 }
             }
-
-            /*
-            debug!(
-                "{:?} {:?} {:?} {:?}",
-                activity_type, files, new_files, old_files
-            );
-            */
-
-            old_files.sort_by(|a, b| a.len().cmp(&b.len()).reverse());
-
-            match activity_type {
-                Some(ActivityType::FileCreated) => {
-                    files.into_iter().map(|f| NCEvent::Create(f)).collect()
+            Some(ActivityType::FileRestored) => {
+                let mut v = Vec::new();
+                for f in files {
+                    let mut t = get_all_sub_path(nc_info, &f)
+                        .await
+                        .into_iter()
+                        .map(|p| NCEvent::Create(p))
+                        .collect::<Vec<_>>();
+                    v.append(&mut t);
                 }
-                Some(ActivityType::FileDeleted) => {
-                    files.into_iter().map(|f| NCEvent::Delete(f)).collect()
-                }
-                Some(ActivityType::FileChanged) => {
-                    if new_files.len() > 0 {
-                        let new_file = new_files.into_iter().nth(0).unwrap();
-                        old_files
-                            .into_iter()
-                            .map(|f| NCEvent::Move(f, new_file.clone()))
-                            .collect()
-                    } else {
-                        files.into_iter().map(|f| NCEvent::Modify(f)).collect()
-                    }
-                }
-                _ => Vec::new(),
+                v
             }
-        })
-        .flatten()
-        .collect();
+            None => Vec::new(),
+        };
+        res.append(&mut v);
+    }
 
     Ok(res)
 }
@@ -599,8 +715,7 @@ fn touch_targets(update_targets: Vec<WeakEntry>, local_info: &LocalInfo) -> anyh
                 }
                 Err(er) => {
                     e_ref.status = EntryStatus::Error;
-                    // return Err(e);
-                    debug!("{}", er);
+                    info!("{}", er);
                 }
             }
         }
@@ -612,13 +727,14 @@ fn touch_targets(update_targets: Vec<WeakEntry>, local_info: &LocalInfo) -> anyh
 pub async fn update_tree(
     nc_info: &NCInfo,
     local_info: &LocalInfo,
-    nc_events: Vec<NCEvent>,
+    mut nc_events: Vec<NCEvent>,
     root_entry: &ArcEntry,
     stash: bool,
 ) -> Result<Vec<WeakEntry>> {
     let mut download_targets = Vec::new();
 
-    for event in nc_events.into_iter() {
+    nc_events.reverse();
+    while let Some(event) = nc_events.pop() {
         {
             let root_ref = root_entry.lock().map_err(|_| LockError)?;
             debug!("\n{}", root_ref.get_tree());
@@ -627,7 +743,6 @@ pub async fn update_tree(
         match event {
             NCEvent::Create(path) => {
                 debug!("Create {}", path);
-                // let path = correct_nc_path(nc_info, &path).await;
                 let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
                 if Entry::get(root_entry, &path)?.is_some() {
                     continue;
@@ -639,18 +754,28 @@ pub async fn update_tree(
                     EntryType::Directory
                 };
                 let new_entry = Arc::new(Mutex::new(Entry::new(name, type_)));
-                let new_entry_w = Arc::downgrade(&new_entry);
-                download_targets.push(new_entry_w);
-                let update_targets =
-                    Entry::append(root_entry, &path, new_entry, AppendMode::Create, false)?;
+                let update_targets = Entry::append(
+                    root_entry,
+                    &path,
+                    new_entry.clone(),
+                    AppendMode::Create,
+                    false,
+                )?;
                 let filop_res = touch_targets(update_targets, local_info);
                 if let Err(e) = filop_res {
                     info!("{}", e);
                 }
+                {
+                    let mut new_entry_ref = new_entry.lock().map_err(|_| LockError)?;
+                    if new_entry_ref.type_.is_file() {
+                        new_entry_ref.status = EntryStatus::NeedUpdate;
+                        let new_entry_w = Arc::downgrade(&new_entry);
+                        download_targets.push(new_entry_w);
+                    }
+                }
             }
             NCEvent::Delete(path) => {
                 debug!("Delete {}", path);
-                // let path = correct_nc_path(nc_info, &path).await?;
                 let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
                 let mut root_ref = root_entry.lock().map_err(|_| LockError)?;
                 let _ = root_ref.pop(&path)?;
@@ -661,30 +786,8 @@ pub async fn update_tree(
             }
             NCEvent::Modify(path) => {
                 debug!("Modify {}", path);
-                // let path = correct_nc_path(nc_info, &path).await;
                 let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
                 let w = Entry::get(root_entry, &path)?;
-                /*
-                if w.is_none() {
-                    let p = add_last_slash(&path);
-                    debug!("{} @ Modify", p);
-                    let v = Entry::get(root_entry, &p)?;
-                    let v = if v.is_none() {
-                        let p = drop_slash(&path, &RE_HAS_LAST_SLASH);
-                        debug!("{} @ Modify", p);
-                        Entry::get(root_entry, &p)?
-                    } else {
-                        v
-                    }
-                    .with_context(|| InvalidPathError(format!("{}", path)))?;
-                    let v_arc = v
-                        .upgrade()
-                        .with_context(|| InvalidPathError(format!("{}", path)))?;
-                    debug!("try_fix_entry_type@modify");
-                    let _ = try_fix_entry_type(&v_arc, &path, nc_info, local_info).await?;
-                    w = Some(v);
-                }
-                */
                 if_chain! {
                     if let Some(w) = w;
                     if let Some(e) = w.upgrade();
@@ -703,33 +806,29 @@ pub async fn update_tree(
             }
             NCEvent::Move(from_path, to_path) => {
                 debug!("Move {} => {}", from_path, to_path);
-                // let to_path = correct_nc_path(nc_info, &to_path).await;
                 let to_path = drop_slash(&to_path, &RE_HAS_LAST_SLASH);
                 let from_path = drop_slash(&from_path, &RE_HAS_LAST_SLASH);
                 let target_w = {
                     let mut root_ref = root_entry.lock().map_err(|_| LockError)?;
                     root_ref.pop(&from_path)?
-                }
-                .with_context(|| InvalidPathError(format!("{} => {}", from_path, to_path)));
+                };
+                // .with_context(|| InvalidPathError(format!("{} => {}", from_path, to_path)));
 
                 let target = match target_w {
-                    Ok(v) => v,
-                    Err(e) => {
-                        info!("{}", e);
+                    Some(v) => v,
+                    None => {
+                        info!(
+                            "from_path({}) is not found.\nI'll try create entries. but This operation will cause strange result.",
+                            from_path
+                        );
+                        let mut v = get_all_sub_path(nc_info, &to_path).await;
+                        v.reverse();
+                        for p in v {
+                            nc_events.push(NCEvent::Create(p));
+                        }
                         continue;
                     }
                 };
-
-                /*
-                debug!("try_fix_entry_type@move");
-                let fixed_to_path = fix_and_concat_nc_path(&to_path, root_entry, &target)?;
-                let have_to_download =
-                    try_fix_entry_type(&target, &fixed_to_path, nc_info, local_info).await?;
-                if have_to_download {
-                    let w = Arc::downgrade(&target);
-                    download_targets.push(w);
-                }
-                */
 
                 let update_targets =
                     Entry::append(root_entry, &to_path, target.clone(), AppendMode::Move, true)?;
@@ -739,12 +838,6 @@ pub async fn update_tree(
                 let res = move_entry(&from_path, &to_path, stash, local_info);
                 match res {
                     Err(er) => {
-                        /*
-                        let mut t_ref = target.lock().map_err(|_| LockError)?;
-                        t_ref.status = EntryStatus::Error;
-                        // return Err(e);
-                        debug!("{}", er);
-                        */
                         info!("{}", er);
                     }
                     Ok(_) => {
@@ -764,32 +857,12 @@ pub async fn update_tree(
     Ok(download_targets)
 }
 
-// Nextcloud API がクソすぎるのために必要...かも...
-/*
-fn fix_and_concat_nc_path(
-    nc_path: &str,
-    root_entry: &ArcEntry,
-    target: &ArcEntry,
-) -> Result<String> {
-    let already_exist = Entry::get(root_entry, add_last_slash(nc_path).as_str())?.is_some();
-
-    if already_exist {
-        let t = drop_slash(nc_path, &RE_HAS_LAST_SLASH);
-        let target_ref = target.lock().map_err(|_| LockError)?;
-        Ok(format!("{}/{}", t, target_ref.get_name()))
-    } else {
-        Ok(nc_path.to_string())
-    }
-}
-*/
-
 async fn try_fix_entry_type(
     target: &ArcEntry,
     path: &str,
     nc_info: &NCInfo,
     local_info: &LocalInfo,
 ) -> Result<bool> {
-    // let path = Entry::get_path(target)?; // @Move, target has no parent.
     let res = from_nc(nc_info, path).await;
 
     let nc_entry = match res {
@@ -810,7 +883,6 @@ async fn try_fix_entry_type(
         EntryType::File { etag: None }
     };
 
-    // let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
     debug!("{}", path);
     remove_entry(&path, false, local_info)?;
     touch_entry(&path, target_ref.type_.is_file(), local_info)?;

@@ -106,16 +106,6 @@ impl EntryType {
         !self.is_file()
     }
 
-    /*
-    pub fn guess_from_name(name: &str) -> Self {
-        if RE_HAS_LAST_SLASH.is_match(name) {
-            Self::Directory
-        } else {
-            Self::File { etag: None }
-        }
-    }
-    */
-
     pub fn get_etag(&self) -> String {
         match self {
             &Self::Directory => "".to_string(),
@@ -282,13 +272,6 @@ impl Entry {
         path_vec.reverse();
 
         path_vec
-        /*
-        if &path_vec[0] == "" {
-            path_vec[1..].to_vec()
-        } else {
-            path_vec
-        }
-        */
     }
 
     pub fn get(this: &ArcEntry, path: &str) -> Result<Option<WeakEntry>> {
