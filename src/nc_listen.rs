@@ -1,17 +1,18 @@
 use crate::errors::NcsError::*;
+use crate::meta::*;
 use crate::*;
 use anyhow::{Context, Result};
 use log::{debug, info};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::{Client, Method, Url};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::io;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
 use urlencoding::decode;
-
-const NC_ROOT_PREFIX: &str = "/remote.php/dav/files/";
-pub const OCS_ROOT: &str = "/ocs/v2.php/apps/activity/api/v2/activity/all";
 
 pub const WEBDAV_BODY: &str = r#"<?xml version="1.0"?>
 <d:propfind  xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
@@ -22,34 +23,14 @@ pub const WEBDAV_BODY: &str = r#"<?xml version="1.0"?>
 </d:propfind>
 "#;
 
-pub struct NCInfo {
-    pub username: String,
-    pub password: String,
-    pub host: String,
-    pub root_path: String,
-}
-
-impl NCInfo {
-    pub fn new(username: String, password: String, host: String) -> Self {
-        let host = fix_host(&host);
-        let root_path = format!("{}{}", NC_ROOT_PREFIX, username);
-        let root_path = fix_root(&root_path);
-        Self {
-            username,
-            password,
-            host,
-            root_path,
-        }
-    }
-}
-
+#[derive(Clone, Debug)]
 pub struct NCState {
     pub latest_activity_id: String,
 }
 
-pub async fn from_nc(nc_info: &NCInfo, target: &str) -> Result<Entry> {
+pub async fn from_nc(nc_info: &NCInfo, local_info: &LocalInfo, target: &str) -> Result<Entry> {
     let target = add_head_slash(&target);
-    let responses = comm_nc(nc_info, &target).await?;
+    let responses = comm_nc(nc_info, local_info, &target).await?;
 
     let target_name = path2name(&target);
     let target_name_without_slash = drop_slash(&target_name, &RE_HAS_LAST_SLASH);
@@ -67,8 +48,8 @@ pub async fn from_nc(nc_info: &NCInfo, target: &str) -> Result<Entry> {
     target_res.with_context(|| format!("Can not find target Entry."))
 }
 
-pub async fn ncpath_is_file(nc_info: &NCInfo, target: &str) -> bool {
-    let entry_res = from_nc(nc_info, target).await;
+pub async fn ncpath_is_file(nc_info: &NCInfo, local_info: &LocalInfo, target: &str) -> bool {
+    let entry_res = from_nc(nc_info, local_info, target).await;
 
     if let Ok(entry) = entry_res {
         entry.type_.is_file()
@@ -77,8 +58,12 @@ pub async fn ncpath_is_file(nc_info: &NCInfo, target: &str) -> bool {
     }
 }
 
-pub async fn get_etag_from_nc(nc_info: &NCInfo, target: &str) -> Option<String> {
-    let entry_res = from_nc(nc_info, target).await;
+pub async fn get_etag_from_nc(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    target: &str,
+) -> Option<String> {
+    let entry_res = from_nc(nc_info, local_info, target).await;
 
     if_chain! {
         if let Ok(entry) = entry_res;
@@ -91,12 +76,16 @@ pub async fn get_etag_from_nc(nc_info: &NCInfo, target: &str) -> Option<String> 
     }
 }
 
-pub async fn from_nc_all(nc_info: &NCInfo, target: &str) -> Result<ArcEntry> {
+pub async fn from_nc_all(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    target: &str,
+) -> Result<ArcEntry> {
     let target = add_head_slash(&target);
-    let top_entry = from_nc(nc_info, &target).await?;
+    let top_entry = from_nc(nc_info, local_info, &target).await?;
     let top_entry = Arc::new(Mutex::new(top_entry));
 
-    get_children_rec(nc_info, &top_entry, "").await?;
+    get_children_rec(nc_info, local_info, &top_entry, "").await?;
 
     Ok(top_entry)
 }
@@ -104,26 +93,27 @@ pub async fn from_nc_all(nc_info: &NCInfo, target: &str) -> Result<ArcEntry> {
 #[async_recursion]
 async fn get_children_rec(
     nc_info: &NCInfo,
+    local_info: &LocalInfo,
     parent_entry: &ArcEntry,
     ancestor_path: &str,
 ) -> Result<()> {
     let parent_name = parent_entry.lock().map_err(|_| LockError)?.get_name();
     let ancestor_path = format!("{}{}", ancestor_path, parent_name);
-    let children_entries = comm_nc(nc_info, &ancestor_path)
+    let children_entries = comm_nc(nc_info, local_info, &ancestor_path)
         .await?
         .into_iter()
         .filter(|c| c.get_name().as_str() != &parent_name);
 
     for c in children_entries {
         let c = Arc::new(Mutex::new(c));
-        get_children_rec(nc_info, &c, &ancestor_path).await?;
+        get_children_rec(nc_info, local_info, &c, &ancestor_path).await?;
         Entry::append_child(parent_entry, c)?;
     }
 
     Ok(())
 }
 
-async fn comm_nc(nc_info: &NCInfo, target: &str) -> Result<Vec<Entry>> {
+async fn comm_nc(nc_info: &NCInfo, local_info: &LocalInfo, target: &str) -> Result<Vec<Entry>> {
     let target = add_head_slash(target);
     let target = drop_slash(&target, &RE_HAS_LAST_SLASH);
 
@@ -151,6 +141,10 @@ async fn comm_nc(nc_info: &NCInfo, target: &str) -> Result<Vec<Entry>> {
 
     let document: roxmltree::Document = roxmltree::Document::parse(&text)?;
     let responses = webdav_xml2responses(&document, &nc_info.root_path);
+    let responses = responses
+        .into_iter()
+        .filter(|e| local_info.exc_checker.judge(e.get_raw_name()))
+        .collect();
 
     Ok(responses)
 }
@@ -229,10 +223,10 @@ struct PathAndIsDir {
 }
 
 // best effort method.
-async fn get_all_sub_path(nc_info: &NCInfo, target: &str) -> Vec<String> {
+async fn get_all_sub_path(nc_info: &NCInfo, local_info: &LocalInfo, target: &str) -> Vec<String> {
     let mut paths = HashSet::new();
     paths.insert(target.to_string());
-    get_all_sub_path_rec(nc_info, target, &mut paths).await;
+    get_all_sub_path_rec(nc_info, local_info, target, &mut paths).await;
     let mut v = paths.into_iter().collect::<Vec<_>>();
     v.sort_by(|a, b| a.len().cmp(&b.len()));
 
@@ -240,9 +234,14 @@ async fn get_all_sub_path(nc_info: &NCInfo, target: &str) -> Vec<String> {
 }
 
 #[async_recursion]
-async fn get_all_sub_path_rec(nc_info: &NCInfo, target: &str, paths: &mut HashSet<String>) {
+async fn get_all_sub_path_rec(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    target: &str,
+    paths: &mut HashSet<String>,
+) {
     let parent_name = drop_slash(target, &RE_HAS_LAST_SLASH);
-    let res = comm_nc_for_path(nc_info, &parent_name).await;
+    let res = comm_nc_for_path(nc_info, local_info, &parent_name).await;
     let res = match res {
         Ok(v) => v,
         Err(e) => {
@@ -258,12 +257,16 @@ async fn get_all_sub_path_rec(nc_info: &NCInfo, target: &str, paths: &mut HashSe
     for PathAndIsDir { path, is_dir } in children_pathandisdirs {
         paths.insert(path.clone());
         if is_dir {
-            get_all_sub_path_rec(nc_info, &path, paths).await;
+            get_all_sub_path_rec(nc_info, local_info, &path, paths).await;
         }
     }
 }
 
-async fn comm_nc_for_path(nc_info: &NCInfo, target: &str) -> Result<Vec<PathAndIsDir>> {
+async fn comm_nc_for_path(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    target: &str,
+) -> Result<Vec<PathAndIsDir>> {
     let target = add_head_slash(target);
     let target = drop_slash(&target, &RE_HAS_LAST_SLASH);
 
@@ -291,6 +294,10 @@ async fn comm_nc_for_path(nc_info: &NCInfo, target: &str) -> Result<Vec<PathAndI
 
     let document: roxmltree::Document = roxmltree::Document::parse(&text)?;
     let responses = webdav_xml2paths(&document, &nc_info.root_path);
+    let responses = responses
+        .into_iter()
+        .filter(|p| local_info.exc_checker.judge(&p.path))
+        .collect();
 
     Ok(responses)
 }
@@ -479,10 +486,10 @@ pub async fn download_file_with_check_etag(
     nc_info: &NCInfo,
     local_info: &LocalInfo,
     entry: &ArcEntry,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let full_path = Entry::get_path(entry)?;
 
-    let nc_etag = get_etag_from_nc(nc_info, &full_path).await;
+    let nc_etag = get_etag_from_nc(nc_info, local_info, &full_path).await;
 
     {
         let mut entry_ref = entry.lock().map_err(|_| LockError)?;
@@ -492,11 +499,12 @@ pub async fn download_file_with_check_etag(
             then {
                 debug!("Need to download.");
                 download_file_raw(nc_info, local_info, &mut entry_ref, &full_path).await?;
+                return Ok(Some(full_path));
             }
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 pub async fn get_latest_activity_id(nc_info: &NCInfo) -> Result<String> {
@@ -521,7 +529,7 @@ pub async fn get_latest_activity_id(nc_info: &NCInfo) -> Result<String> {
         .map(|v| v.to_string())
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum NCEvent {
     Create(String),
     Delete(String),
@@ -529,7 +537,11 @@ pub enum NCEvent {
     Move(String, String),
 }
 
-pub async fn get_ncevents(nc_info: &NCInfo, nc_state: &mut NCState) -> Result<Vec<NCEvent>> {
+pub async fn get_ncevents(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    nc_state: &mut NCState,
+) -> Result<Vec<NCEvent>> {
     let mut url = Url::parse(&nc_info.host)?;
     let path_v = OCS_ROOT
         .split("/")
@@ -567,7 +579,7 @@ pub async fn get_ncevents(nc_info: &NCInfo, nc_state: &mut NCState) -> Result<Ve
     let text = res.text_with_charset("utf-8").await?;
 
     let document: roxmltree::Document<'_> = roxmltree::Document::parse(&text)?;
-    let responses = ncevents_xml2responses(&document, nc_info).await?;
+    let responses = ncevents_xml2responses(&document, nc_info, local_info).await?;
 
     nc_state.latest_activity_id = latest_activity_id;
 
@@ -589,6 +601,7 @@ enum ActivityType {
 async fn ncevents_xml2responses(
     document: &roxmltree::Document<'_>,
     nc_info: &NCInfo,
+    local_info: &LocalInfo,
 ) -> Result<Vec<NCEvent>> {
     let data = document
         .root_element()
@@ -686,7 +699,7 @@ async fn ncevents_xml2responses(
             Some(ActivityType::FileRestored) => {
                 let mut v = Vec::new();
                 for f in files {
-                    let mut t = get_all_sub_path(nc_info, &f)
+                    let mut t = get_all_sub_path(nc_info, local_info, &f)
                         .await
                         .into_iter()
                         .map(|p| NCEvent::Create(p))
@@ -724,7 +737,7 @@ fn touch_targets(update_targets: Vec<WeakEntry>, local_info: &LocalInfo) -> anyh
     Ok(())
 }
 
-pub async fn update_tree(
+async fn update_tree(
     nc_info: &NCInfo,
     local_info: &LocalInfo,
     mut nc_events: Vec<NCEvent>,
@@ -743,12 +756,18 @@ pub async fn update_tree(
         match event {
             NCEvent::Create(path) => {
                 debug!("Create {}", path);
+
+                if !local_info.exc_checker.judge(&path) {
+                    debug!("{:?}: Excluded File.", path);
+                    continue;
+                }
+
                 let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
                 if Entry::get(root_entry, &path)?.is_some() {
                     continue;
                 }
                 let name = path2name(&path);
-                let type_ = if ncpath_is_file(nc_info, &path).await {
+                let type_ = if ncpath_is_file(nc_info, local_info, &path).await {
                     EntryType::File { etag: None }
                 } else {
                     EntryType::Directory
@@ -776,6 +795,12 @@ pub async fn update_tree(
             }
             NCEvent::Delete(path) => {
                 debug!("Delete {}", path);
+
+                if !local_info.exc_checker.judge(&path) {
+                    debug!("{:?}: Excluded File.", path);
+                    continue;
+                }
+
                 let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
                 let mut root_ref = root_entry.lock().map_err(|_| LockError)?;
                 let _ = root_ref.pop(&path)?;
@@ -786,6 +811,12 @@ pub async fn update_tree(
             }
             NCEvent::Modify(path) => {
                 debug!("Modify {}", path);
+
+                if !local_info.exc_checker.judge(&path) {
+                    debug!("{:?}: Excluded File.", path);
+                    continue;
+                }
+
                 let path = drop_slash(&path, &RE_HAS_LAST_SLASH);
                 let w = Entry::get(root_entry, &path)?;
                 if_chain! {
@@ -806,6 +837,12 @@ pub async fn update_tree(
             }
             NCEvent::Move(from_path, to_path) => {
                 debug!("Move {} => {}", from_path, to_path);
+
+                if !local_info.exc_checker.judge(&to_path) {
+                    debug!("{:?}: Excluded File.", to_path);
+                    continue;
+                }
+
                 let to_path = drop_slash(&to_path, &RE_HAS_LAST_SLASH);
                 let from_path = drop_slash(&from_path, &RE_HAS_LAST_SLASH);
                 let target_w = {
@@ -821,7 +858,7 @@ pub async fn update_tree(
                             "from_path({}) is not found.\nI'll try create entries. but This operation will cause strange result.",
                             from_path
                         );
-                        let mut v = get_all_sub_path(nc_info, &to_path).await;
+                        let mut v = get_all_sub_path(nc_info, local_info, &to_path).await;
                         v.reverse();
                         for p in v {
                             nc_events.push(NCEvent::Create(p));
@@ -863,7 +900,7 @@ async fn try_fix_entry_type(
     nc_info: &NCInfo,
     local_info: &LocalInfo,
 ) -> Result<bool> {
-    let res = from_nc(nc_info, path).await;
+    let res = from_nc(nc_info, local_info, path).await;
 
     let nc_entry = match res {
         Ok(entry) => entry,
@@ -888,4 +925,63 @@ async fn try_fix_entry_type(
     touch_entry(&path, target_ref.type_.is_file(), local_info)?;
 
     Ok(target_ref.type_.is_file())
+}
+
+pub async fn nclistening(
+    tx: mpsc::Sender<Command>,
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    mut nc_state: NCState,
+) -> Result<()> {
+    loop {
+        let events = get_ncevents(nc_info, local_info, &mut nc_state).await?;
+
+        if events.len() > 0 {
+            tx.send(Command::NCEvents(events, nc_state.clone())).await?;
+        }
+
+        sleep(Duration::from_secs(20)).await;
+    }
+}
+
+pub async fn update_and_download(
+    events: Vec<NCEvent>,
+    root: &ArcEntry,
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    nc2l_cancel_map: &mut HashMap<String, usize>,
+    l2nc_cancel_set: &mut HashSet<NCEvent>,
+) -> Result<()> {
+    let mut nc2l_cancel_targets = Vec::new();
+    let events = events
+        .into_iter()
+        .filter(|ev| !l2nc_cancel_set.remove(ev))
+        .collect::<Vec<_>>();
+    debug!("events: {:?}", events);
+    let download_targets = update_tree(nc_info, local_info, events, root, false).await?;
+    for target in download_targets.into_iter() {
+        if let Some(e) = target.upgrade() {
+            {
+                let e_ref = e.lock().map_err(|_| LockError)?;
+                if e_ref.type_.is_dir() {
+                    continue;
+                }
+            }
+            let target_path = download_file_with_check_etag(nc_info, local_info, &e).await?;
+            {
+                let mut e_ref = e.lock().map_err(|_| LockError)?;
+                e_ref.status = EntryStatus::UpToDate;
+            }
+            if let Some(p) = target_path {
+                nc2l_cancel_targets.push(p);
+            }
+        }
+    }
+
+    for item in nc2l_cancel_targets {
+        let counter = nc2l_cancel_map.entry(item).or_insert(0);
+        *counter += 1;
+    }
+
+    Ok(())
 }

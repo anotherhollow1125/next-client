@@ -68,11 +68,28 @@ where
     T: AsRef<path::Path> + Display,
 {
     debug!("remove_entry: {}", path);
+    if !path.as_ref().exists() {
+        return Ok(());
+    }
 
     // todo
     // stash function it will stash path file or dir.
 
     fs_extra::remove_items(&[path])?;
+
+    Ok(())
+}
+
+pub fn remove_items<P>(paths: &[P], _stash: bool) -> Result<()>
+where
+    P: AsRef<path::Path>,
+{
+    debug!("remove items: len(paths) = {}", paths.len());
+
+    // todo
+    // stash function it will stash path file or dir.
+
+    fs_extra::remove_items(paths)?;
 
     Ok(())
 }

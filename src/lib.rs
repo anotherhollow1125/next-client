@@ -3,9 +3,11 @@ use anyhow::{Context, Result};
 use log::{debug, info};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
+// use notify::DebouncedEvent;
 
 #[macro_use]
 extern crate anyhow;
@@ -14,34 +16,36 @@ extern crate if_chain;
 #[macro_use]
 extern crate async_recursion;
 
-pub mod dump;
 pub mod errors;
 mod fileope;
+pub mod local_listen;
+pub mod meta;
 pub mod nc_listen;
+pub mod repair;
+
+pub struct PublicResource {
+    pub root: ArcEntry,
+    pub nc_state: nc_listen::NCState,
+    pub local_event_stack: VecDeque<notify::DebouncedEvent>,
+}
+
+pub type ArcResource = Arc<Mutex<PublicResource>>;
+pub type WeakResource = Weak<Mutex<PublicResource>>;
+
+impl PublicResource {
+    pub fn new(root: ArcEntry, nc_state: nc_listen::NCState) -> Self {
+        Self {
+            root,
+            nc_state,
+            local_event_stack: VecDeque::new(),
+        }
+    }
+}
 
 use errors::NcsError::*;
 
 pub static RE_HAS_LAST_SLASH: Lazy<Regex> = Lazy::new(|| Regex::new("(.*)/$").unwrap());
 pub static RE_HAS_HEAD_SLASH: Lazy<Regex> = Lazy::new(|| Regex::new("^/(.*)").unwrap());
-
-pub struct LocalInfo {
-    pub root_path: String,
-}
-
-impl LocalInfo {
-    pub fn new(root_path: String) -> Self {
-        let root_path = drop_slash(&root_path, &RE_HAS_LAST_SLASH);
-        Self { root_path }
-    }
-
-    pub fn get_metadir_name(&self) -> String {
-        format!("{}/.ncs/", self.root_path)
-    }
-
-    pub fn get_cachefile_name(&self) -> String {
-        format!("{}cache.json", self.get_metadir_name())
-    }
-}
 
 pub fn add_head_slash(s: &str) -> String {
     if RE_HAS_HEAD_SLASH.is_match(s) {
@@ -86,6 +90,14 @@ pub fn fix_root(root_path: &str) -> String {
 pub fn path2name(path: &str) -> String {
     let p = drop_slash(path, &RE_HAS_LAST_SLASH);
     p.split("/").last().unwrap_or("").to_string()
+}
+
+// To be honest, the naming failed
+pub fn path2str(path: &Path) -> String {
+    let path = path.to_string_lossy().to_string();
+    let path = path.replace("\\", "/");
+    let path = add_head_slash(&path);
+    drop_slash(&path, &RE_HAS_LAST_SLASH)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,6 +507,14 @@ impl Entry {
 pub enum AppendMode {
     Create,
     Move,
+}
+
+#[derive(Debug)]
+pub enum Command {
+    NCEvents(Vec<nc_listen::NCEvent>, nc_listen::NCState),
+    LocEvent(local_listen::LocalEvent),
+    HardRepair,
+    Terminate,
 }
 
 #[cfg(test)]
