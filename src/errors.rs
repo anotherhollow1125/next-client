@@ -12,4 +12,6 @@ pub enum NcsError {
     WeakUpgradeError,
     #[error("Invalid path. {0}")]
     InvalidPathError(String),
+    #[error("Network is offline.")]
+    NetworkOfflineError,
 }

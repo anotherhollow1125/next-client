@@ -1,9 +1,16 @@
 use crate::errors::NcsError::*;
 use crate::*;
 use anyhow::Result;
+use notify::DebouncedEvent;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::mpsc as std_mpsc;
+use std::sync::Mutex;
 use std::{fs, io::Write};
+use tokio::sync::mpsc::Sender as TokioSender;
+// use std::time::Duration as StdDuration;
+// use notify::{watcher, DebouncedEvent, RecursiveMode, Watcher};
 
 const NC_ROOT_PREFIX: &str = "/remote.php/dav/files/";
 pub const OCS_ROOT: &str = "/ocs/v2.php/apps/activity/api/v2/activity/all";
@@ -129,6 +136,10 @@ impl LocalInfo {
         format!("{}excludes.json", self.get_metadir_name())
     }
 
+    pub fn get_stashpath_name(&self) -> String {
+        format!("{}stash", self.get_metadir_name())
+    }
+
     pub fn get_metadir_name_raw(root_path: &str) -> String {
         format!("{}/.ncs/", root_path)
     }
@@ -175,6 +186,44 @@ impl JsonExcludeList {
         writeln!(exc_file, "{}", j)?;
 
         Ok(())
+    }
+}
+
+pub async fn exc_list_update_watching(
+    com_tx: TokioSender<Command>,
+    rx: Mutex<std_mpsc::Receiver<DebouncedEvent>>,
+    local_info: &LocalInfo,
+) -> Result<()> {
+    let exc_file_name = local_info.get_excludefile_name();
+    let exc_file = Path::new(&exc_file_name)
+        .file_name()
+        .ok_or_else(|| InvalidPathError("Invalid exclude file name.".to_string()))?;
+
+    loop {
+        if com_tx.is_closed() {
+            return Ok(());
+        }
+
+        let c = {
+            let rx_ref = rx.lock().map_err(|_| LockError)?;
+            match rx_ref.recv() {
+                Ok(DebouncedEvent::Create(p)) | Ok(DebouncedEvent::Write(p)) => {
+                    if p.file_name() == Some(exc_file) {
+                        Some(Command::UpdateExcFile)
+                    } else {
+                        None
+                    }
+                }
+                Ok(_) => None,
+                Err(e) => {
+                    info!("{:?}", e);
+                    return Ok(());
+                }
+            }
+        };
+        if let Some(c) = c {
+            com_tx.send(c).await?;
+        }
     }
 }
 

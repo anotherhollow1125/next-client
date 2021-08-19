@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use log::{debug, info};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
@@ -21,12 +21,13 @@ mod fileope;
 pub mod local_listen;
 pub mod meta;
 pub mod nc_listen;
+pub mod network;
 pub mod repair;
 
 pub struct PublicResource {
     pub root: ArcEntry,
     pub nc_state: nc_listen::NCState,
-    pub local_event_stack: VecDeque<notify::DebouncedEvent>,
+    // pub local_event_que: VecDeque<notify::DebouncedEvent>,
 }
 
 pub type ArcResource = Arc<Mutex<PublicResource>>;
@@ -37,7 +38,7 @@ impl PublicResource {
         Self {
             root,
             nc_state,
-            local_event_stack: VecDeque::new(),
+            // local_event_que: VecDeque::new(),
         }
     }
 }
@@ -244,6 +245,20 @@ impl Entry {
             .children
             .insert(child_name, child);
         Ok(())
+    }
+
+    pub fn get_child(&self, child_name: &str) -> Option<WeakEntry> {
+        const RE_LAST_ITEM: Lazy<Regex> = Lazy::new(|| Regex::new(r".*?([^/\\]*)$").unwrap());
+
+        let child_name = RE_LAST_ITEM.replace(child_name, "$1").to_string();
+        self.children.get(&child_name).map(|a| Arc::downgrade(a))
+    }
+
+    pub fn get_all_children(&self) -> Vec<WeakEntry> {
+        self.children
+            .values()
+            .map(|c| Arc::downgrade(c))
+            .collect::<Vec<_>>()
     }
 
     pub fn get_tree(&self) -> String {
@@ -513,7 +528,10 @@ pub enum AppendMode {
 pub enum Command {
     NCEvents(Vec<nc_listen::NCEvent>, nc_listen::NCState),
     LocEvent(local_listen::LocalEvent),
+    UpdateExcFile,
     HardRepair,
+    NetworkConnect,
+    NetworkDisconnect,
     Terminate,
 }
 

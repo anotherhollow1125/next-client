@@ -1,6 +1,7 @@
 use crate::errors::NcsError::*;
 use crate::meta::*;
 use crate::nc_listen::NCEvent;
+use crate::repair::ModifiedPath;
 use crate::*;
 use anyhow::Result;
 #[allow(unused_imports)]
@@ -8,9 +9,10 @@ use log::{debug, info};
 use notify::DebouncedEvent as DebEvent;
 use reqwest::{Client, Method, Url};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver as StdReceiver;
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use tokio::sync::mpsc::Sender as TokioSender;
@@ -19,7 +21,6 @@ use tokio::sync::mpsc::Sender as TokioSender;
 // use notify::{watcher, RecursiveMode, Watcher};
 // use tokio::sync::mpsc::Receiver;
 // use tokio::sync::mpsc as tokio_mpsc;
-// use std::sync::mpsc::Receiver as StdReceiver;
 // use std::sync::mpsc as std_mpsc;
 // use crate::nc_listen::{self, NCInfo};
 // use crate::{ArcResource, LocalInfo};
@@ -31,6 +32,19 @@ pub enum LocalEvent {
     Delete(PathBuf),
     Modify(PathBuf),
     Move(PathBuf, PathBuf),
+}
+
+impl ModifiedPath for LocalEvent {
+    type Item = PathBuf;
+
+    fn to_modified_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Create(p) => Some(p.clone()),
+            Self::Delete(_) => None,
+            Self::Modify(p) => Some(p.clone()),
+            Self::Move(_, p) => Some(p.clone()),
+        }
+    }
 }
 
 impl LocalEvent {
@@ -65,7 +79,7 @@ fn fix_path(path: &Path) -> PathBuf {
     Path::new(&s).to_path_buf()
 }
 
-fn get_localpath(path: &Path, local_info: &LocalInfo) -> PathBuf {
+pub fn get_localpath(path: &Path, local_info: &LocalInfo) -> PathBuf {
     let path = if path.starts_with("/") {
         path.strip_prefix("/").unwrap_or(path)
     } else {
@@ -76,10 +90,15 @@ fn get_localpath(path: &Path, local_info: &LocalInfo) -> PathBuf {
 
 pub async fn watching(
     com_tx: TokioSender<Command>,
-    rx: Mutex<StdReceiver<DebEvent>>,
+    rx: Mutex<std_mpsc::Receiver<DebEvent>>,
     local_info: &LocalInfo,
+    _nc_info: &NCInfo,
 ) -> Result<()> {
     loop {
+        if com_tx.is_closed() {
+            return Ok(());
+        }
+
         let mut items = Vec::new();
         {
             let rx_ref = rx.lock().map_err(|_| LockError)?;
@@ -113,6 +132,8 @@ pub async fn watching(
                 }
             }
         }
+
+        // let _ = network::check(&com_tx, nc_info).await?;
 
         for mut item in items {
             item.strip_root(&local_info.root_path);
@@ -426,7 +447,11 @@ async fn comm_nc(nc_info: &NCInfo, method: NCMethod) -> Result<Option<String>> {
 
     let reqbuil = match method {
         NCMethod::Put(_, file_path) => {
-            let buf = fs::read(&file_path)?;
+            let buf = if let Ok(v) = fs::read(&file_path) {
+                v
+            } else {
+                vec![]
+            };
 
             // debug!("{:?} 's content : {:?}", file_path, buf);
 

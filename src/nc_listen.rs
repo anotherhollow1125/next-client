@@ -1,5 +1,6 @@
 use crate::errors::NcsError::*;
 use crate::meta::*;
+use crate::repair::ModifiedPath;
 use crate::*;
 use anyhow::{Context, Result};
 use log::{debug, info};
@@ -7,6 +8,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::{Client, Method, Url};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -26,6 +28,21 @@ pub const WEBDAV_BODY: &str = r#"<?xml version="1.0"?>
 #[derive(Clone, Debug)]
 pub struct NCState {
     pub latest_activity_id: String,
+}
+
+impl NCState {
+    pub fn eq_or_newer_than(&self, other: &Self) -> bool {
+        let s = self
+            .latest_activity_id
+            .parse::<usize>()
+            .expect("latest activity id val is invalid.");
+        let o = other
+            .latest_activity_id
+            .parse::<usize>()
+            .expect("latest activity id val is invalid.");
+
+        o <= s
+    }
 }
 
 pub async fn from_nc(nc_info: &NCInfo, local_info: &LocalInfo, target: &str) -> Result<Entry> {
@@ -379,14 +396,18 @@ fn touch_entry(path: &str, is_file: bool, local_info: &LocalInfo) -> Result<()> 
 fn move_entry(from_path: &str, to_path: &str, stash: bool, local_info: &LocalInfo) -> Result<()> {
     let from_path = format!("{}{}", local_info.root_path, from_path);
     let to_path = format!("{}{}", local_info.root_path, to_path);
-    fileope::move_entry(from_path, to_path, stash)?;
+    fileope::move_entry(
+        from_path,
+        to_path,
+        if stash { Some(local_info) } else { None },
+    )?;
 
     Ok(())
 }
 
 fn remove_entry(path: &str, stash: bool, local_info: &LocalInfo) -> Result<()> {
     let path = format!("{}{}", local_info.root_path, path);
-    fileope::remove_entry(path, stash)?;
+    fileope::remove_entry(path, if stash { Some(local_info) } else { None })?;
 
     Ok(())
 }
@@ -529,12 +550,25 @@ pub async fn get_latest_activity_id(nc_info: &NCInfo) -> Result<String> {
         .map(|v| v.to_string())
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NCEvent {
     Create(String),
     Delete(String),
     Modify(String),
     Move(String, String),
+}
+
+impl ModifiedPath for NCEvent {
+    type Item = String;
+
+    fn to_modified_path(&self) -> Option<String> {
+        match self {
+            Self::Create(s) => Some(s.clone()),
+            Self::Delete(_) => None,
+            Self::Modify(s) => Some(s.clone()),
+            Self::Move(_, s) => Some(s.clone()),
+        }
+    }
 }
 
 pub async fn get_ncevents(
@@ -934,6 +968,15 @@ pub async fn nclistening(
     mut nc_state: NCState,
 ) -> Result<()> {
     loop {
+        if tx.is_closed() {
+            return Ok(());
+        }
+
+        if !network::check(&tx, nc_info).await? {
+            sleep(Duration::from_secs(10)).await;
+            continue;
+        }
+
         let events = get_ncevents(nc_info, local_info, &mut nc_state).await?;
 
         if events.len() > 0 {
