@@ -530,6 +530,7 @@ pub enum Command {
     LocEvent(local_listen::LocalEvent),
     UpdateExcFile,
     HardRepair,
+    NormalRepair,
     NetworkConnect,
     NetworkDisconnect,
     Terminate,

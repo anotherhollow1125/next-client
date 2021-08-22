@@ -225,6 +225,16 @@ async fn run() -> Result<bool> {
                 repair::all_delete(&local_info)?;
                 return Ok(true);
             }
+            Command::NormalRepair => {
+                let events = {
+                    let mut pr_ref = public_resource.lock().map_err(|_| LockError)?;
+                    get_ncevents(&nc_info, &local_info, &mut pr_ref.nc_state).await?
+                };
+                repair::normal_repair(&local_info, &nc_info, &public_resource, events).await?;
+                sleep(Duration::from_secs(20)).await;
+                retry = true;
+                break;
+            }
             Command::NetworkConnect => match network_status {
                 NetworkStatus::Connect => (),
                 _ => {
