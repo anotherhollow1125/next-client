@@ -183,11 +183,11 @@ pub async fn deal_local_event(
                 return Ok(());
             }
 
-            debug!("LocEvent::Create({:?})", p);
+            info!("LocEvent::Create({:?})", p);
 
             let p_str = path2str(&p);
             if Entry::get(root, &p_str)?.is_some() {
-                debug!("Already Exists.");
+                info!("Already Exists.");
 
                 deal_local_event(
                     LocalEvent::Modify(p),
@@ -263,11 +263,11 @@ pub async fn deal_local_event(
                 return Ok(());
             }
 
-            debug!("LocEvent::Delete({:?})", p);
+            info!("LocEvent::Delete({:?})", p);
 
             let p_str = path2str(&p);
             if Entry::get(root, &p_str)?.is_none() {
-                debug!("Already Deleted.");
+                info!("Already Deleted.");
                 return Ok(());
             }
 
@@ -302,11 +302,11 @@ pub async fn deal_local_event(
                 return Ok(());
             }
 
-            debug!("LocEvent::Modify({:?})", p);
+            info!("LocEvent::Modify({:?})", p);
 
             let p_str = path2str(&p);
             if Entry::get(root, &p_str)?.is_none() {
-                debug!("But not found.");
+                info!("But not found.");
                 return Ok(());
             }
 
@@ -331,8 +331,6 @@ pub async fn deal_local_event(
                 debug!("LocEvent::Move({:?}, _) : but still exists.", p);
                 return Ok(());
             }
-
-            debug!("LocEvent::Move({:?}, {:?})", p, q);
 
             let p_is_exc = !local_info.exc_checker.judge(&p);
             let q_is_exc = !local_info.exc_checker.judge(&q);
@@ -372,9 +370,11 @@ pub async fn deal_local_event(
                 return Ok(());
             }
 
+            info!("LocEvent::Move({:?}, {:?})", p, q);
+
             let p_str = path2str(&p);
             if Entry::get(root, &p_str)?.is_none() {
-                debug!("But not found from_item.");
+                info!("But not found from_item.");
                 return Ok(());
             }
 
