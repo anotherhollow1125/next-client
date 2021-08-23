@@ -1,6 +1,7 @@
 use crate::errors::NcsError::*;
 use crate::*;
 use anyhow::Result;
+use chrono::prelude::*;
 use notify::DebouncedEvent;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -138,6 +139,12 @@ impl LocalInfo {
 
     pub fn get_stashpath_name(&self) -> String {
         format!("{}stash", self.get_metadir_name())
+    }
+
+    pub fn get_logfile_name(&self) -> String {
+        let dt = Local::now();
+        let name = format!("{}.log", dt.format("%Y%m%d"));
+        format!("{}log/{}", self.get_metadir_name(), name)
     }
 
     pub fn get_metadir_name_raw(root_path: &str) -> String {

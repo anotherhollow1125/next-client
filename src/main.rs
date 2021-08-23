@@ -45,6 +45,8 @@ async fn run() -> Result<bool> {
     let local_root_path = env::var("LOCAL_ROOT").expect("LOCAL_ROOT not found");
     let local_info = LocalInfo::new(local_root_path)?;
 
+    // debug!("log_file: {}", local_info.get_logfile_name());
+
     let public_resource: PublicResource;
     if Path::new(local_info.get_cachefile_name().as_str()).exists() {
         // load cache
