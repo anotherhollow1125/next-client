@@ -4,7 +4,8 @@ use crate::meta::*;
 use crate::nc_listen::*;
 use crate::*;
 use anyhow::Result;
-use log::info;
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs;
@@ -76,7 +77,7 @@ pub async fn soft_repair(
     }
 
     if let Err(e) = res {
-        info!("{:?}\nI'll try normal repair.", e);
+        warn!("{:?}\nI'll try normal repair.", e);
         *nc2l_cancel_map = HashMap::new();
         *l2nc_cancel_set = HashSet::new();
         normal_repair(local_info, nc_info, resource, events).await?;
@@ -107,7 +108,7 @@ pub async fn soft_repair(
 
     let local_modified_path_vec = local_events.get_modified_path_vec();
 
-    info!("local_events: {:?}", local_modified_path_vec);
+    debug!("local_events: {:?}", local_modified_path_vec);
 
     for p in local_modified_path_vec.into_iter() {
         let local_p = get_localpath(&p, local_info);

@@ -3,7 +3,8 @@ use crate::meta::*;
 use crate::repair::ModifiedPath;
 use crate::*;
 use anyhow::{Context, Result};
-use log::{debug, info};
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::{Client, Method, Url};
@@ -262,7 +263,7 @@ async fn get_all_sub_path_rec(
     let res = match res {
         Ok(v) => v,
         Err(e) => {
-            info!("{}", e);
+            error!("{:?}", e);
             return;
         }
     };
@@ -762,7 +763,7 @@ fn touch_targets(update_targets: Vec<WeakEntry>, local_info: &LocalInfo) -> anyh
                 }
                 Err(er) => {
                     e_ref.status = EntryStatus::Error;
-                    info!("{}", er);
+                    warn!("{:?}", er);
                 }
             }
         }
@@ -816,7 +817,7 @@ async fn update_tree(
                 )?;
                 let filop_res = touch_targets(update_targets, local_info);
                 if let Err(e) = filop_res {
-                    info!("{}", e);
+                    warn!("{:?}", e);
                 }
                 {
                     let mut new_entry_ref = new_entry.lock().map_err(|_| LockError)?;
@@ -840,7 +841,7 @@ async fn update_tree(
                 let _ = root_ref.pop(&path)?;
                 let filop_res = remove_entry(&path, stash, local_info);
                 if let Err(e) = filop_res {
-                    info!("{}", e);
+                    warn!("{:?}", e);
                 }
             }
             NCEvent::Modify(path) => {
@@ -888,7 +889,7 @@ async fn update_tree(
                 let target = match target_w {
                     Some(v) => v,
                     None => {
-                        info!(
+                        warn!(
                             "from_path({}) is not found.\nI'll try create entries. but This operation will cause strange result.",
                             from_path
                         );
@@ -909,7 +910,7 @@ async fn update_tree(
                 let res = move_entry(&from_path, &to_path, stash, local_info);
                 match res {
                     Err(er) => {
-                        info!("{}", er);
+                        warn!("{:?}", er);
                     }
                     Ok(_) => {
                         debug!("try_fix_entry_type@move");

@@ -1,7 +1,8 @@
 use crate::meta::NCInfo;
 use crate::*;
 use anyhow::{Error, Result};
-use log::info;
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -40,7 +41,7 @@ pub async fn status_raw(nc_info: &NCInfo) -> NetworkStatus {
         Ok(_) => NetworkStatus::Connect,
         Err(e) if e.is_connect() => NetworkStatus::Disconnect,
         Err(e) => {
-            info!("{:?}", e);
+            error!("{:?}", e);
             NetworkStatus::Err(Error::new(e))
         }
     }
@@ -65,7 +66,7 @@ pub async fn status(nc_info: &NCInfo) -> Result<NetworkStatus> {
         Ok(_) => Ok(NetworkStatus::Connect),
         Err(e) if e.is_connect() => Ok(NetworkStatus::Disconnect),
         Err(e) => {
-            info!("{:?}", e);
+            error!("{:?}", e);
             Err(e.into())
         }
     }

@@ -2,7 +2,8 @@ use crate::meta::LocalInfo;
 use anyhow::Result;
 use chrono::prelude::*;
 use fs_extra::dir::CopyOptions;
-use log::debug;
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::{fs, io, path};

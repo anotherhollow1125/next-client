@@ -2,6 +2,8 @@ use crate::errors::NcsError::*;
 use crate::*;
 use anyhow::Result;
 use chrono::prelude::*;
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
 use notify::DebouncedEvent;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -223,7 +225,7 @@ pub async fn exc_list_update_watching(
                 }
                 Ok(_) => None,
                 Err(e) => {
-                    info!("{:?}", e);
+                    error!("{:?}", e);
                     return Ok(());
                 }
             }

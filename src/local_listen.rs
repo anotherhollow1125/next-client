@@ -5,7 +5,7 @@ use crate::repair::ModifiedPath;
 use crate::*;
 use anyhow::Result;
 #[allow(unused_imports)]
-use log::{debug, info};
+use log::{debug, error, info, warn};
 use notify::DebouncedEvent as DebEvent;
 use reqwest::{Client, Method, Url};
 use std::collections::{HashMap, HashSet};
@@ -126,7 +126,7 @@ pub async fn watching(
                         _ => (),
                     },
                     Err(e) => {
-                        info!("{:?}", e);
+                        error!("{:?}", e);
                         return Ok(());
                     }
                 }
