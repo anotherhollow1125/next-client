@@ -533,7 +533,7 @@ pub enum Command {
     NormalRepair,
     NetworkConnect,
     NetworkDisconnect,
-    Terminate,
+    Terminate(bool),
 }
 
 #[cfg(test)]

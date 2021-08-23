@@ -23,7 +23,7 @@ use tokio::time::{sleep, Duration};
 macro_rules! terminate_send {
     ($tx:expr) => {
         let mut counter: u32 = 0;
-        while let Err(e) = $tx.send(Command::Terminate).await {
+        while let Err(e) = $tx.send(Command::Terminate(true)).await {
             info!("{:?}", e);
             counter += 1;
             if counter > 3 {
@@ -135,7 +135,7 @@ async fn run() -> Result<bool> {
         let _ = std::io::stdin().read_line(&mut ln);
         let com = match ln.trim() {
             "RESET" => Command::HardRepair,
-            _ => Command::Terminate,
+            _ => Command::Terminate(false),
         };
         // まだRESETでsend errorの時を考慮してない
         let res = tx.send(com).await;
@@ -284,7 +284,10 @@ async fn run() -> Result<bool> {
                 }
                 _ => (),
             },
-            Command::Terminate => break,
+            Command::Terminate(r) => {
+                retry = r;
+                break;
+            }
         }
     }
 
