@@ -72,6 +72,7 @@ pub async fn soft_repair(
             local_info,
             nc2l_cancel_map,
             l2nc_cancel_set,
+            true,
         )
         .await;
     }
@@ -103,7 +104,7 @@ pub async fn soft_repair(
             continue;
         };
 
-        let _ = nc_listen::download_file_with_check_etag(nc_info, local_info, &entry).await?;
+        let _ = nc_listen::download_file_with_check_etag(nc_info, local_info, &entry, true).await?;
     }
 
     let local_modified_path_vec = local_events.get_modified_path_vec();
@@ -214,7 +215,7 @@ pub async fn normal_repair(
             continue;
         };
 
-        let _ = nc_listen::download_file_with_check_etag(nc_info, local_info, &entry).await?;
+        let _ = nc_listen::download_file_with_check_etag(nc_info, local_info, &entry, true).await?;
     }
 
     {

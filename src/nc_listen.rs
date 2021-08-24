@@ -373,9 +373,15 @@ fn webdav_xml2paths(document: &roxmltree::Document, root_path: &str) -> Vec<Path
 
 // ==================== ↑ need refactoring ↑ ========================================
 
-fn save_file<R: io::Read>(r: &mut R, path: &str, local_info: &LocalInfo) -> Result<()> {
+fn save_file<R: io::Read>(
+    r: &mut R,
+    path: &str,
+    local_info: &LocalInfo,
+    stash: bool,
+) -> Result<()> {
     let filename = format!("{}{}", local_info.root_path, path);
-    fileope::save_file(r, &filename)?;
+    let stash = if stash { Some(local_info) } else { None };
+    fileope::save_file(r, &filename, stash)?;
 
     Ok(())
 }
@@ -459,6 +465,7 @@ async fn download_file_raw(
     local_info: &LocalInfo,
     entry: &mut Entry,
     full_path: &str,
+    stash: bool,
 ) -> Result<()> {
     if entry.type_.is_dir() {
         return Err(anyhow!("Not file entry!!"));
@@ -488,7 +495,7 @@ async fn download_file_raw(
     };
 
     let bytes = data_res.bytes().await?;
-    save_file(&mut bytes.as_ref(), full_path, local_info)?;
+    save_file(&mut bytes.as_ref(), full_path, local_info, stash)?;
 
     Ok(())
 }
@@ -501,13 +508,14 @@ async fn download_file_in_rec(
 ) -> Result<()> {
     let full_path = format!("{}{}", ancestor_path, entry.get_name());
 
-    download_file_raw(nc_info, local_info, entry, &full_path).await
+    download_file_raw(nc_info, local_info, entry, &full_path, false).await
 }
 
 pub async fn download_file_with_check_etag(
     nc_info: &NCInfo,
     local_info: &LocalInfo,
     entry: &ArcEntry,
+    stash: bool,
 ) -> Result<Option<String>> {
     let full_path = Entry::get_path(entry)?;
 
@@ -520,7 +528,7 @@ pub async fn download_file_with_check_etag(
             if entry_ref.type_ != EntryType::File { etag: Some(etag) };
             then {
                 debug!("Need to download.");
-                download_file_raw(nc_info, local_info, &mut entry_ref, &full_path).await?;
+                download_file_raw(nc_info, local_info, &mut entry_ref, &full_path, stash).await?;
                 return Ok(Some(full_path));
             }
         }
@@ -995,6 +1003,7 @@ pub async fn update_and_download(
     local_info: &LocalInfo,
     nc2l_cancel_map: &mut HashMap<String, usize>,
     l2nc_cancel_set: &mut HashSet<NCEvent>,
+    stash: bool,
 ) -> Result<()> {
     let mut nc2l_cancel_targets = Vec::new();
     let events = events
@@ -1002,7 +1011,7 @@ pub async fn update_and_download(
         .filter(|ev| !l2nc_cancel_set.remove(ev))
         .collect::<Vec<_>>();
     debug!("events: {:?}", events);
-    let download_targets = update_tree(nc_info, local_info, events, root, false).await?;
+    let download_targets = update_tree(nc_info, local_info, events, root, stash).await?;
     for target in download_targets.into_iter() {
         if let Some(e) = target.upgrade() {
             {
@@ -1011,7 +1020,7 @@ pub async fn update_and_download(
                     continue;
                 }
             }
-            let target_path = download_file_with_check_etag(nc_info, local_info, &e).await?;
+            let target_path = download_file_with_check_etag(nc_info, local_info, &e, stash).await?;
             {
                 let mut e_ref = e.lock().map_err(|_| LockError)?;
                 e_ref.status = EntryStatus::UpToDate;

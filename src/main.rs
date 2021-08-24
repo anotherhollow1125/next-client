@@ -191,6 +191,7 @@ async fn run() -> Result<bool> {
                         &local_info,
                         &mut nc2l_cancel_map,
                         &mut l2nc_cancel_set,
+                        false,
                     )
                     .await;
                     if let Err(e) = res {
