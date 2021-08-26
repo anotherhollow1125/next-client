@@ -203,7 +203,7 @@ async fn run() -> Result<bool> {
                     info!("It should be unreachable branch. something wrong.");
                 }
             },
-            Command::UpdateExcFile => {
+            Command::UpdateExcFile | Command::UpdateConfigFile => {
                 retry = true;
                 break;
                 /*

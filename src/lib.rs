@@ -529,6 +529,7 @@ pub enum Command {
     NCEvents(Vec<nc_listen::NCEvent>, nc_listen::NCState),
     LocEvent(local_listen::LocalEvent),
     UpdateExcFile,
+    UpdateConfigFile,
     HardRepair,
     NormalRepair,
     NetworkConnect,
