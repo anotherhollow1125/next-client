@@ -16,15 +16,6 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use tokio::sync::mpsc::Sender as TokioSender;
-// use tokio::time::sleep;
-// use tokio::time::Duration;
-// use notify::{watcher, RecursiveMode, Watcher};
-// use tokio::sync::mpsc::Receiver;
-// use tokio::sync::mpsc as tokio_mpsc;
-// use std::sync::mpsc as std_mpsc;
-// use crate::nc_listen::{self, NCInfo};
-// use crate::{ArcResource, LocalInfo};
-// use anyhow::{Context, Result};
 
 #[derive(Debug)]
 pub enum LocalEvent {
@@ -125,8 +116,8 @@ pub async fn watching(
                         DebEvent::Rename(p, q) => items.push(LocalEvent::Move(p, q)),
                         _ => (),
                     },
-                    Err(e) => {
-                        error!("{:?}", e);
+                    Err(_e) => {
+                        // error!("{:?}", e);
                         return Ok(());
                     }
                 }

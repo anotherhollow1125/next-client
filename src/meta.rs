@@ -115,15 +115,19 @@ pub fn save_cache(
 pub struct LocalInfo {
     pub root_path: String,
     pub exc_checker: meta::ExcludeChecker,
+    log_file_name: String,
 }
 
 impl LocalInfo {
     pub fn new(root_path: String) -> Result<Self> {
         let root_path = drop_slash(&root_path, &RE_HAS_LAST_SLASH);
         let exc_checker = meta::ExcludeChecker::new(&root_path)?;
+        let dt = Local::now();
+        let log_file_name = format!("{}.log", dt.format("%Y%m%d"));
         Ok(Self {
             root_path,
             exc_checker,
+            log_file_name,
         })
     }
 
@@ -144,9 +148,7 @@ impl LocalInfo {
     }
 
     pub fn get_logfile_name(&self) -> String {
-        let dt = Local::now();
-        let name = format!("{}.log", dt.format("%Y%m%d"));
-        format!("{}log/{}", self.get_metadir_name(), name)
+        format!("{}log/{}", self.get_metadir_name(), self.log_file_name)
     }
 
     pub fn get_metadir_name_raw(root_path: &str) -> String {
@@ -224,8 +226,8 @@ pub async fn exc_list_update_watching(
                     }
                 }
                 Ok(_) => None,
-                Err(e) => {
-                    error!("{:?}", e);
+                Err(_e) => {
+                    // error!("{:?}", e);
                     return Ok(());
                 }
             }
