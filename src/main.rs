@@ -150,6 +150,7 @@ async fn run() -> Result<bool> {
     let mut l2nc_cancel_set = HashSet::new();
     let mut offline_locevent_que: Vec<local_listen::LocalEvent> = Vec::new();
     let mut retry = false;
+    let mut error = None;
     while let Some(e) = com_rx.recv().await {
         match e {
             Command::LocEvent(ev) => match network_status {
@@ -289,6 +290,10 @@ async fn run() -> Result<bool> {
                 retry = r;
                 break;
             }
+            Command::Error(e) => {
+                error = Some(e);
+                break;
+            }
         }
     }
 
@@ -313,6 +318,10 @@ async fn run() -> Result<bool> {
         json_entry,
         &local_info,
     )?;
+
+    if let Some(e) = error {
+        return Err(e);
+    }
 
     Ok(retry)
 }

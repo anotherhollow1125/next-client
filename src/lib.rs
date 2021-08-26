@@ -535,6 +535,7 @@ pub enum Command {
     NetworkConnect,
     NetworkDisconnect,
     Terminate(bool),
+    Error(anyhow::Error),
 }
 
 #[cfg(test)]
