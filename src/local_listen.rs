@@ -436,6 +436,8 @@ async fn comm_nc(nc_info: &NCInfo, method: NCMethod) -> Result<Option<String>> {
     let mut url = Url::parse(&nc_info.host)?;
     url.path_segments_mut().unwrap().extend(path);
 
+    let client = Client::builder().https_only(true).build()?;
+
     let reqbuil = match method {
         NCMethod::Put(_, file_path) => {
             let buf = if let Ok(v) = fs::read(&file_path) {
@@ -446,12 +448,10 @@ async fn comm_nc(nc_info: &NCInfo, method: NCMethod) -> Result<Option<String>> {
 
             // debug!("{:?} 's content : {:?}", file_path, buf);
 
-            Client::new().request(Method::PUT, url.as_str()).body(buf)
+            client.request(Method::PUT, url.as_str()).body(buf)
         }
-        NCMethod::Mkcol(_) => {
-            Client::new().request(Method::from_bytes(b"MKCOL").unwrap(), url.as_str())
-        }
-        NCMethod::Delete(_) => Client::new().request(Method::DELETE, url.as_str()),
+        NCMethod::Mkcol(_) => client.request(Method::from_bytes(b"MKCOL").unwrap(), url.as_str()),
+        NCMethod::Delete(_) => client.request(Method::DELETE, url.as_str()),
         NCMethod::Move(_, to_target) => {
             let p = format!("{}{}", &nc_info.root_path, to_target)
                 .split("/")
@@ -460,7 +460,7 @@ async fn comm_nc(nc_info: &NCInfo, method: NCMethod) -> Result<Option<String>> {
             let mut to_url = Url::parse(&nc_info.host)?;
             to_url.path_segments_mut().unwrap().extend(p);
 
-            Client::new()
+            client
                 .request(Method::from_bytes(b"MOVE").unwrap(), url.as_str())
                 .header("Destination", to_url.as_str())
         }

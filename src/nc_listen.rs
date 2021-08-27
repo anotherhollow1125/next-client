@@ -143,7 +143,9 @@ async fn comm_nc(nc_info: &NCInfo, local_info: &LocalInfo, target: &str) -> Resu
     let mut url = Url::parse(&nc_info.host)?;
     url.path_segments_mut().unwrap().extend(path);
 
-    let res = Client::new()
+    let client = Client::builder().https_only(true).build()?;
+
+    let res = client
         .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
         .basic_auth(&nc_info.username, Some(&nc_info.password))
         .header("Depth", "Infinity")
@@ -296,7 +298,9 @@ async fn comm_nc_for_path(
     let mut url = Url::parse(&nc_info.host)?;
     url.path_segments_mut().unwrap().extend(path);
 
-    let res = Client::new()
+    let client = Client::builder().https_only(true).build()?;
+
+    let res = client
         .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
         .basic_auth(&nc_info.username, Some(&nc_info.password))
         .header("Depth", "Infinity")
@@ -478,7 +482,9 @@ async fn download_file_raw(
         .collect::<Vec<String>>();
     url.path_segments_mut().unwrap().extend(path_v);
 
-    let data_res = Client::new()
+    let client = Client::builder().https_only(true).build()?;
+
+    let data_res = client
         .request(Method::GET, url.as_str())
         .basic_auth(&nc_info.username, Some(&nc_info.password))
         .send()
@@ -545,7 +551,9 @@ pub async fn get_latest_activity_id(nc_info: &NCInfo) -> Result<String> {
         .collect::<Vec<String>>();
     url.path_segments_mut().unwrap().extend(path_v);
 
-    let res = Client::new()
+    let client = Client::builder().https_only(true).build()?;
+
+    let res = client
         .request(Method::GET, url.as_str())
         .basic_auth(&nc_info.username, Some(&nc_info.password))
         .header("OCS-APIRequest", "true")
@@ -592,7 +600,9 @@ pub async fn get_ncevents(
         .collect::<Vec<String>>();
     url.path_segments_mut().unwrap().extend(path_v);
 
-    let res = Client::new()
+    let client = Client::builder().https_only(true).build()?;
+
+    let res = client
         .request(Method::GET, url.as_str())
         .query(&[
             ("since", nc_state.latest_activity_id.to_string().as_str()),
