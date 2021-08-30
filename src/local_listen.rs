@@ -171,6 +171,17 @@ pub async fn deal_local_event(
 
             if Entry::get(root, &p_parent_str)?.is_none() {
                 debug!("Its parent is not registered yet.");
+
+                deal_local_event(
+                    LocalEvent::Create(p_parent.to_path_buf()),
+                    root,
+                    nc_info,
+                    local_info,
+                    nc2l_cancel_map,
+                    l2nc_cancel_set,
+                )
+                .await?;
+
                 return Ok(());
             }
 
@@ -298,6 +309,17 @@ pub async fn deal_local_event(
             let p_str = path2str(&p);
             if Entry::get(root, &p_str)?.is_none() {
                 info!("But not found.");
+
+                deal_local_event(
+                    LocalEvent::Create(p),
+                    root,
+                    nc_info,
+                    local_info,
+                    nc2l_cancel_map,
+                    l2nc_cancel_set,
+                )
+                .await?;
+
                 return Ok(());
             }
 
@@ -366,6 +388,17 @@ pub async fn deal_local_event(
             let p_str = path2str(&p);
             if Entry::get(root, &p_str)?.is_none() {
                 info!("But not found from_item.");
+
+                deal_local_event(
+                    LocalEvent::Create(p),
+                    root,
+                    nc_info,
+                    local_info,
+                    nc2l_cancel_map,
+                    l2nc_cancel_set,
+                )
+                .await?;
+
                 return Ok(());
             }
 
