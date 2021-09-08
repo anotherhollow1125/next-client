@@ -116,10 +116,11 @@ pub struct LocalInfo {
     pub root_path: String,
     pub exc_checker: meta::ExcludeChecker,
     log_file_name: String,
+    pub req_client: reqwest::Client,
 }
 
 impl LocalInfo {
-    pub fn new(root_path: String) -> Result<Self> {
+    pub fn new(root_path: String, req_client: reqwest::Client) -> Result<Self> {
         let root_path = drop_slash(&root_path, &RE_HAS_LAST_SLASH);
         let exc_checker = meta::ExcludeChecker::new(&root_path)?;
         let dt = Local::now();
@@ -128,6 +129,7 @@ impl LocalInfo {
             root_path,
             exc_checker,
             log_file_name,
+            req_client,
         })
     }
 

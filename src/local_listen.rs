@@ -7,7 +7,7 @@ use anyhow::Result;
 #[allow(unused_imports)]
 use log::{debug, error, info, warn};
 use notify::DebouncedEvent as DebEvent;
-use reqwest::{Client, Method, Url};
+use reqwest::{Method, Url};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs;
@@ -210,7 +210,7 @@ pub async fn deal_local_event(
                 NCMethod::Mkcol(p_str.clone())
             };
 
-            let etag_w = comm_nc(nc_info, method).await?;
+            let etag_w = comm_nc(nc_info, local_info, method).await?;
             let name = p
                 .file_name()
                 .ok_or_else(|| InvalidPathError("Something wrong in notify path.".to_string()))?
@@ -273,7 +273,7 @@ pub async fn deal_local_event(
                 return Ok(());
             }
 
-            let _ = comm_nc(nc_info, NCMethod::Delete(p_str.clone())).await?;
+            let _ = comm_nc(nc_info, local_info, NCMethod::Delete(p_str.clone())).await?;
             {
                 let mut root_ref = root.lock().map_err(|_| LockError)?;
                 let _ = root_ref.pop(&p_str)?;
@@ -323,7 +323,8 @@ pub async fn deal_local_event(
                 return Ok(());
             }
 
-            let etag_w = comm_nc(nc_info, NCMethod::Put(p_str.clone(), local_p)).await?;
+            let etag_w =
+                comm_nc(nc_info, local_info, NCMethod::Put(p_str.clone(), local_p)).await?;
             let entry_w = Entry::get(root, &p_str)?;
             if_chain! {
                 if let Some(w) = entry_w;
@@ -404,7 +405,12 @@ pub async fn deal_local_event(
 
             let q_str = path2str(&q);
 
-            let _ = comm_nc(nc_info, NCMethod::Move(p_str.clone(), q_str.clone())).await?;
+            let _ = comm_nc(
+                nc_info,
+                local_info,
+                NCMethod::Move(p_str.clone(), q_str.clone()),
+            )
+            .await?;
             let entry = {
                 let mut root_ref = root.lock().map_err(|_| LockError)?;
                 root_ref
@@ -453,7 +459,11 @@ enum NCMethod {
     Move(String, String),
 }
 
-async fn comm_nc(nc_info: &NCInfo, method: NCMethod) -> Result<Option<String>> {
+async fn comm_nc(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    method: NCMethod,
+) -> Result<Option<String>> {
     let target = match method {
         NCMethod::Put(ref target, _) => target.to_string(),
         NCMethod::Mkcol(ref target) => target.to_string(),
@@ -469,7 +479,8 @@ async fn comm_nc(nc_info: &NCInfo, method: NCMethod) -> Result<Option<String>> {
     let mut url = Url::parse(&nc_info.host)?;
     url.path_segments_mut().unwrap().extend(path);
 
-    let client = Client::builder().https_only(true).build()?;
+    // let client = Client::builder().https_only(true).build()?;
+    let ref client = local_info.req_client;
 
     let reqbuil = match method {
         NCMethod::Put(_, file_path) => {

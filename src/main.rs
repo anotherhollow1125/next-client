@@ -17,6 +17,7 @@ use std::time::Duration as StdDuration;
 use tokio::sync::mpsc as tokio_mpsc;
 #[allow(unused)]
 use tokio::time::{sleep, Duration};
+// use if_chain::if_chain;
 // #[macro_use]
 // extern crate anyhow;
 
@@ -43,7 +44,32 @@ async fn run() -> Result<bool> {
     let nc_info = NCInfo::new(username, password, host);
 
     let local_root_path = env::var("LOCAL_ROOT").expect("LOCAL_ROOT not found");
-    let local_info = LocalInfo::new(local_root_path)?;
+    let mut client_builder = reqwest::Client::builder().https_only(true);
+
+    if let Ok(proxy_url) = env::var("PROXY") {
+        debug!("{}", proxy_url);
+        let proxy = reqwest::Proxy::https(proxy_url)?;
+        /*
+        if_chain! {
+            if let Ok(pr_user) = env::var("PROXY_USER");
+            if let Ok(pr_password) = env::var("PROXY_PASSWORD");
+            then {
+                debug!("{}", pr_user);
+                proxy = proxy.basic_auth(&pr_user, &pr_password);
+            }
+        }
+        */
+        client_builder = client_builder.proxy(proxy);
+    }
+
+    let client = client_builder.build()?;
+
+    /*
+    let test = client.get("https://google.com").send().await?.status();
+    debug!("status: {:?}", test);
+    */
+
+    let local_info = LocalInfo::new(local_root_path, client.clone())?;
 
     // debug!("log_file: {}", local_info.get_logfile_name());
 
@@ -58,7 +84,7 @@ async fn run() -> Result<bool> {
         public_resource = PublicResource::new(root_entry, nc_state);
     } else {
         // init
-        if !network::is_online(&nc_info).await {
+        if !network::is_online(&nc_info, &client).await {
             return Err(NetworkOfflineError.into());
         }
 
@@ -145,7 +171,7 @@ async fn run() -> Result<bool> {
         }
     });
 
-    let mut network_status = network::status(&nc_info).await?;
+    let mut network_status = network::status(&nc_info, &client).await?;
     let mut nc2l_cancel_map = HashMap::new();
     let mut l2nc_cancel_set = HashSet::new();
     let mut offline_locevent_que: Vec<local_listen::LocalEvent> = Vec::new();
@@ -338,7 +364,7 @@ async fn main() -> Result<()> {
 
 async fn init(nc_info: &NCInfo, local_info: &LocalInfo) -> Result<(ArcEntry, String)> {
     let root_entry = from_nc_all(nc_info, local_info, "/").await?;
-    let latest_activity_id = get_latest_activity_id(nc_info).await?;
+    let latest_activity_id = get_latest_activity_id(nc_info, local_info).await?;
     debug!("{}", latest_activity_id);
 
     init_local_entries(nc_info, local_info, &root_entry, "").await?;

@@ -197,7 +197,7 @@ pub async fn normal_repair(
     events: Vec<NCEvent>,
 ) -> Result<()> {
     let root_entry = from_nc_all(nc_info, local_info, "/").await?;
-    let latest_activity_id = get_latest_activity_id(nc_info).await?;
+    let latest_activity_id = get_latest_activity_id(nc_info, local_info).await?;
 
     let modified_path_vec = events.get_modified_path_vec();
 

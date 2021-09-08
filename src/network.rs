@@ -29,9 +29,9 @@ impl std::cmp::PartialEq for NetworkStatus {
 
 impl std::cmp::Eq for NetworkStatus {}
 
-pub async fn status_raw(nc_info: &NCInfo) -> NetworkStatus {
+pub async fn status_raw(nc_info: &NCInfo, client: &reqwest::Client) -> NetworkStatus {
     // let res = reqwest::get(&nc_info.host).await;
-    let res = reqwest::Client::new()
+    let res = client
         .get(&nc_info.host)
         .timeout(Duration::from_secs(5))
         .send()
@@ -47,16 +47,16 @@ pub async fn status_raw(nc_info: &NCInfo) -> NetworkStatus {
     }
 }
 
-pub async fn is_online(nc_info: &NCInfo) -> bool {
-    match status_raw(nc_info).await {
+pub async fn is_online(nc_info: &NCInfo, client: &reqwest::Client) -> bool {
+    match status_raw(nc_info, client).await {
         NetworkStatus::Connect => true,
         _ => false,
     }
 }
 
-pub async fn status(nc_info: &NCInfo) -> Result<NetworkStatus> {
+pub async fn status(nc_info: &NCInfo, client: &reqwest::Client) -> Result<NetworkStatus> {
     // let res = reqwest::get(&nc_info.host).await;
-    let res = reqwest::Client::new()
+    let res = client
         .get(&nc_info.host)
         .timeout(Duration::from_secs(5))
         .send()
@@ -72,8 +72,12 @@ pub async fn status(nc_info: &NCInfo) -> Result<NetworkStatus> {
     }
 }
 
-pub async fn check(tx: &mpsc::Sender<Command>, nc_info: &NCInfo) -> Result<bool> {
-    let res = is_online(nc_info).await;
+pub async fn check(
+    tx: &mpsc::Sender<Command>,
+    nc_info: &NCInfo,
+    client: &reqwest::Client,
+) -> Result<bool> {
+    let res = is_online(nc_info, client).await;
 
     if res {
         tx.send(Command::NetworkConnect).await?;

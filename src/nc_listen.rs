@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use reqwest::{Client, Method, Url};
+use reqwest::{Method, Url};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -143,7 +143,8 @@ async fn comm_nc(nc_info: &NCInfo, local_info: &LocalInfo, target: &str) -> Resu
     let mut url = Url::parse(&nc_info.host)?;
     url.path_segments_mut().unwrap().extend(path);
 
-    let client = Client::builder().https_only(true).build()?;
+    // let client = Client::builder().https_only(true).build()?;
+    let ref client = local_info.req_client;
 
     let res = client
         .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
@@ -298,7 +299,8 @@ async fn comm_nc_for_path(
     let mut url = Url::parse(&nc_info.host)?;
     url.path_segments_mut().unwrap().extend(path);
 
-    let client = Client::builder().https_only(true).build()?;
+    // let client = Client::builder().https_only(true).build()?;
+    let ref client = local_info.req_client;
 
     let res = client
         .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
@@ -482,7 +484,8 @@ async fn download_file_raw(
         .collect::<Vec<String>>();
     url.path_segments_mut().unwrap().extend(path_v);
 
-    let client = Client::builder().https_only(true).build()?;
+    // let client = Client::builder().https_only(true).build()?;
+    let ref client = local_info.req_client;
 
     let data_res = client
         .request(Method::GET, url.as_str())
@@ -543,7 +546,7 @@ pub async fn download_file_with_check_etag(
     Ok(None)
 }
 
-pub async fn get_latest_activity_id(nc_info: &NCInfo) -> Result<String> {
+pub async fn get_latest_activity_id(nc_info: &NCInfo, local_info: &LocalInfo) -> Result<String> {
     let mut url = Url::parse(&nc_info.host)?;
     let path_v = OCS_ROOT
         .split("/")
@@ -551,7 +554,8 @@ pub async fn get_latest_activity_id(nc_info: &NCInfo) -> Result<String> {
         .collect::<Vec<String>>();
     url.path_segments_mut().unwrap().extend(path_v);
 
-    let client = Client::builder().https_only(true).build()?;
+    // let client = Client::builder().https_only(true).build()?;
+    let ref client = local_info.req_client;
 
     let res = client
         .request(Method::GET, url.as_str())
@@ -600,7 +604,8 @@ pub async fn get_ncevents(
         .collect::<Vec<String>>();
     url.path_segments_mut().unwrap().extend(path_v);
 
-    let client = Client::builder().https_only(true).build()?;
+    // let client = Client::builder().https_only(true).build()?;
+    let ref client = local_info.req_client;
 
     let res = client
         .request(Method::GET, url.as_str())
@@ -991,7 +996,7 @@ pub async fn nclistening(
             return Ok(());
         }
 
-        if !network::check(&tx, nc_info).await? {
+        if !network::check(&tx, nc_info, &local_info.req_client).await? {
             sleep(Duration::from_secs(10)).await;
             continue;
         }
