@@ -19,6 +19,7 @@ extern crate async_recursion;
 pub mod errors;
 mod fileope;
 pub mod local_listen;
+pub mod messaging;
 pub mod meta;
 pub mod nc_listen;
 pub mod network;
