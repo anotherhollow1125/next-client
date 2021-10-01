@@ -1,12 +1,13 @@
 use std::convert::{Into, TryFrom, TryInto};
 
+#[derive(Debug)]
 pub struct NCSyncMessage {
     pub kind: NCSyncKind,
     pub is_recursive: bool,
     pub target: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum NCSyncKind {
     Push,
     Pull,
