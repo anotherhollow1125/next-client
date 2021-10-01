@@ -9,7 +9,11 @@ use std::fmt::Debug;
 use std::{fs, io, path};
 // use crate::errors::NcsError::*;
 
-pub fn save_file<R: io::Read>(r: &mut R, filename: &str, stash: Option<&LocalInfo>) -> Result<()> {
+pub fn save_file<R: io::Read + ?Sized>(
+    r: &mut R,
+    filename: &str,
+    stash: Option<&LocalInfo>,
+) -> Result<()> {
     debug!("save_file: {}", filename);
 
     if_chain! {

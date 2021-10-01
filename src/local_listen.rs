@@ -90,10 +90,11 @@ pub async fn watching(
             return Ok(());
         }
 
+        let mut watcher_dead_flag = false;
         let mut items = Vec::new();
         {
             let rx_ref = rx.lock().map_err(|_| LockError)?;
-            let mut stack = vec![rx_ref.recv()];
+            let mut stack = vec![rx_ref.recv_timeout(StdDuration::from_secs(60))];
             while let Some(rcv) = stack.pop() {
                 match rcv {
                     Ok(ev) => match ev {
@@ -116,9 +117,15 @@ pub async fn watching(
                         DebEvent::Rename(p, q) => items.push(LocalEvent::Move(p, q)),
                         _ => (),
                     },
-                    Err(_e) => {
+                    Err(e) => {
                         // error!("{:?}", e);
-                        return Ok(());
+                        match e {
+                            std_mpsc::RecvTimeoutError::Timeout => {
+                                watcher_dead_flag = true;
+                                break;
+                            }
+                            std_mpsc::RecvTimeoutError::Disconnected => return Ok(()),
+                        }
                     }
                 }
             }
@@ -130,6 +137,11 @@ pub async fn watching(
             item.strip_root(&local_info.root_path);
             // item.reformat_path();
             com_tx.send(Command::LocEvent(item)).await?;
+        }
+
+        if watcher_dead_flag {
+            com_tx.send(Command::Terminate(true)).await?;
+            return Ok(());
         }
     }
 }

@@ -146,17 +146,30 @@ async fn comm_nc(nc_info: &NCInfo, local_info: &LocalInfo, target: &str) -> Resu
     // let client = Client::builder().https_only(true).build()?;
     let ref client = local_info.req_client;
 
-    let res = client
-        .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
-        .basic_auth(&nc_info.username, Some(&nc_info.password))
-        .header("Depth", "Infinity")
-        .body(WEBDAV_BODY)
-        .send()
-        .await?;
+    let mut res_w = Err(anyhow!("dummy error"));
+    for _ in 0u8..3 {
+        let res = client
+            .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
+            .basic_auth(&nc_info.username, Some(&nc_info.password))
+            .header("Depth", "Infinity")
+            .body(WEBDAV_BODY)
+            .send()
+            .await?;
 
-    if !res.status().is_success() {
-        return Err(BadStatusError(res.status().as_u16()).into());
+        res_w = if res.status().is_success() {
+            Ok(res)
+        } else {
+            Err(BadStatusError(res.status().as_u16()).into())
+        };
+        if res_w.is_ok() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
     }
+    let res = match res_w {
+        Ok(r) => r,
+        Err(e) => return Err(e),
+    };
 
     let text = res.text_with_charset("utf-8").await?;
 
@@ -302,17 +315,30 @@ async fn comm_nc_for_path(
     // let client = Client::builder().https_only(true).build()?;
     let ref client = local_info.req_client;
 
-    let res = client
-        .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
-        .basic_auth(&nc_info.username, Some(&nc_info.password))
-        .header("Depth", "Infinity")
-        .body(WEBDAV_BODY)
-        .send()
-        .await?;
+    let mut res_w = Err(anyhow!("dummy error"));
+    for _ in 0u8..3 {
+        let res = client
+            .request(Method::from_bytes(b"PROPFIND").unwrap(), url.as_str())
+            .basic_auth(&nc_info.username, Some(&nc_info.password))
+            .header("Depth", "Infinity")
+            .body(WEBDAV_BODY)
+            .send()
+            .await?;
 
-    if !res.status().is_success() {
-        return Err(BadStatusError(res.status().as_u16()).into());
+        res_w = if res.status().is_success() {
+            Ok(res)
+        } else {
+            Err(BadStatusError(res.status().as_u16()).into())
+        };
+        if res_w.is_ok() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
     }
+    let res = match res_w {
+        Ok(r) => r,
+        Err(e) => return Err(e),
+    };
 
     let text = res.text_with_charset("utf-8").await?;
 
@@ -379,7 +405,7 @@ fn webdav_xml2paths(document: &roxmltree::Document, root_path: &str) -> Vec<Path
 
 // ==================== ↑ need refactoring ↑ ========================================
 
-fn save_file<R: io::Read>(
+fn save_file<R: io::Read + ?Sized>(
     r: &mut R,
     path: &str,
     local_info: &LocalInfo,
@@ -995,6 +1021,14 @@ pub async fn nclistening(
         if tx.is_closed() {
             return Ok(());
         }
+
+        let dt = chrono::Local::now();
+        let timestamp = dt.format("Y-m-d %H:%M:%S").to_string();
+        fileope::save_file(
+            &mut timestamp.as_bytes(),
+            local_info.get_keepalive_filename().as_str(),
+            None,
+        )?;
 
         if !network::check(&tx, nc_info, &local_info.req_client).await? {
             sleep(Duration::from_secs(10)).await;

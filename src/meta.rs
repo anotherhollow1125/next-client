@@ -153,6 +153,10 @@ impl LocalInfo {
         format!("{}log/{}", self.get_metadir_name(), self.log_file_name)
     }
 
+    pub fn get_keepalive_filename(&self) -> String {
+        format!("{}.keepalive.txt", self.get_metadir_name())
+    }
+
     pub fn get_metadir_name_raw(root_path: &str) -> String {
         format!("{}/.ncs/", root_path)
     }
