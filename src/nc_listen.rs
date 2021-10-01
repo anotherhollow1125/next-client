@@ -1023,7 +1023,7 @@ pub async fn nclistening(
         }
 
         let dt = chrono::Local::now();
-        let timestamp = dt.format("Y-m-d %H:%M:%S").to_string();
+        let timestamp = dt.format("%Y-%m-%d %H:%M:%S").to_string();
         fileope::save_file(
             &mut timestamp.as_bytes(),
             local_info.get_keepalive_filename().as_str(),
