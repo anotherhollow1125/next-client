@@ -7,7 +7,7 @@ use log::{debug, error, info, warn};
 use notify::DebouncedEvent;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Mutex;
 use std::{fs, io::Write};
@@ -114,6 +114,7 @@ pub fn save_cache(
 #[derive(Clone)]
 pub struct LocalInfo {
     pub root_path: String,
+    pub root_path_cano: PathBuf,
     pub exc_checker: meta::ExcludeChecker,
     log_file_name: String,
     pub req_client: reqwest::Client,
@@ -122,11 +123,13 @@ pub struct LocalInfo {
 impl LocalInfo {
     pub fn new(root_path: String, req_client: reqwest::Client) -> Result<Self> {
         let root_path = drop_slash(&root_path, &RE_HAS_LAST_SLASH);
+        let root_path_cano = Path::new(&root_path).canonicalize()?;
         let exc_checker = meta::ExcludeChecker::new(&root_path)?;
         let dt = Local::now();
         let log_file_name = format!("{}.log", dt.format("%Y%m%d"));
         Ok(Self {
             root_path,
+            root_path_cano,
             exc_checker,
             log_file_name,
             req_client,
