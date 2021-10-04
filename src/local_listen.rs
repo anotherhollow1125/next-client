@@ -140,6 +140,7 @@ pub async fn watching(
         }
 
         if watcher_dead_flag {
+            warn!("[[watcher dead flag]]");
             com_tx.send(Command::Terminate(true)).await?;
             return Ok(());
         }
