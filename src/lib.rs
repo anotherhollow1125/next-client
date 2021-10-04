@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 // use notify::DebouncedEvent;
 
@@ -528,6 +528,11 @@ pub enum AppendMode {
 #[derive(Debug)]
 pub enum Command {
     NCEvents(Vec<nc_listen::NCEvent>, nc_listen::NCState),
+    PullEvent {
+        target: PathBuf,
+        is_recursive: bool,
+        stash: bool,
+    },
     LocEvent(local_listen::LocalEvent),
     UpdateExcFile,
     UpdateConfigFile,

@@ -320,6 +320,7 @@ async fn run() -> Result<bool> {
                 error = Some(e);
                 break;
             }
+            Command::PullEvent { .. } => (),
         }
     }
 
