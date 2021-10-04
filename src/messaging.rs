@@ -4,6 +4,7 @@ use std::convert::{Into, TryFrom, TryInto};
 pub struct NCSyncMessage {
     pub kind: NCSyncKind,
     pub is_recursive: bool,
+    pub use_stash: bool,
     pub target: String,
 }
 
@@ -38,7 +39,7 @@ impl TryFrom<&[u8]> for NCSyncMessage {
     type Error = anyhow::Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < 2 {
+        if value.len() < 3 {
             return Err(anyhow!("Invalid array."));
         }
 
@@ -47,11 +48,16 @@ impl TryFrom<&[u8]> for NCSyncMessage {
             0 => false,
             _ => true,
         };
-        let target = String::from_utf8((&value[2..]).to_vec())?;
+        let use_stash = match value[2] {
+            0 => false,
+            _ => true,
+        };
+        let target = String::from_utf8((&value[3..]).to_vec())?;
 
         Ok(Self {
             kind,
             is_recursive,
+            use_stash,
             target,
         })
     }
@@ -59,9 +65,10 @@ impl TryFrom<&[u8]> for NCSyncMessage {
 
 impl Into<Vec<u8>> for NCSyncMessage {
     fn into(self) -> Vec<u8> {
-        let mut res = Vec::with_capacity(2);
+        let mut res = Vec::with_capacity(3);
         res.push(self.kind.into());
         res.push(self.is_recursive.into());
+        res.push(self.use_stash.into());
         res.extend_from_slice(self.target.as_bytes());
 
         res

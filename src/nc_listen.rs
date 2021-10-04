@@ -1087,3 +1087,135 @@ pub async fn update_and_download(
 
     Ok(())
 }
+
+// possibly, there are similar functions above. sorry.
+// つまりリファクタリングしたほうが良くない？関数ですハイ
+// でもありそうでなかった関数かも...
+pub async fn refresh<P>(
+    target: P,
+    is_recursive: bool,
+    root: &ArcEntry,
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    nc2l_cancel_map: &mut HashMap<String, usize>,
+    stash: bool,
+) -> Result<()>
+where
+    P: AsRef<Path> + Debug,
+{
+    let mut res = Ok(());
+
+    let mut target_path = target.as_ref();
+    if target_path.is_absolute() {
+        target_path = match target_path.strip_prefix(&local_info.root_path_cano) {
+            Ok(p) => p,
+            Err(e) => return Err(anyhow!("Invalid Path. Please check the process. : {:?}", e)),
+        }
+    }
+
+    let target_str = path2str(target_path);
+
+    let target_entry = if_chain! {
+        if let Ok(Some(w)) = Entry::get(root, &target_str);
+        if let Some(entry) = w.upgrade();
+        then {
+            entry
+        } else {
+            info!("[refresh] no such entry: {:?}", target_str);
+            return Ok(());
+        }
+    };
+
+    let is_file = {
+        let entry = target_entry.lock().map_err(|_| LockError)?;
+        entry.type_.is_file()
+    };
+
+    if is_file {
+        {
+            let mut entry = target_entry.lock().map_err(|_| LockError)?;
+            download_file_raw(nc_info, local_info, &mut entry, &target_str, stash).await?;
+        }
+        let counter = nc2l_cancel_map.entry(target_str).or_insert(0);
+        *counter += 1;
+    } else {
+        let children = {
+            let entry = target_entry.lock().map_err(|_| LockError)?;
+            entry.get_all_children()
+        };
+
+        for child in children.into_iter() {
+            if let Some(child) = child.upgrade() {
+                let r = refresh_rec(
+                    &child,
+                    &target_str,
+                    is_recursive,
+                    nc_info,
+                    local_info,
+                    nc2l_cancel_map,
+                    stash,
+                )
+                .await;
+                if let Err(e) = r {
+                    res = Err(e);
+                }
+            }
+        }
+    }
+
+    res
+}
+
+#[async_recursion(?Send)]
+async fn refresh_rec(
+    target_entry: &ArcEntry,
+    parent_str: &str,
+    is_recursive: bool,
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    nc2l_cancel_map: &mut HashMap<String, usize>,
+    stash: bool,
+) -> Result<()> {
+    let mut res = Ok(());
+
+    let (name, is_file) = {
+        let entry = target_entry.lock().map_err(|_| LockError)?;
+        (entry.get_raw_name(), entry.type_.is_file())
+    };
+
+    let target_str = format!("{}/{}", parent_str, name);
+
+    if is_file {
+        {
+            let mut entry = target_entry.lock().map_err(|_| LockError)?;
+            download_file_raw(nc_info, local_info, &mut entry, &target_str, stash).await?;
+        }
+        let counter = nc2l_cancel_map.entry(target_str).or_insert(0);
+        *counter += 1;
+    } else if is_recursive {
+        let children = {
+            let entry = target_entry.lock().map_err(|_| LockError)?;
+            entry.get_all_children()
+        };
+
+        for child in children.into_iter() {
+            if let Some(child) = child.upgrade() {
+                let r = refresh_rec(
+                    &child,
+                    &target_str,
+                    is_recursive,
+                    nc_info,
+                    local_info,
+                    nc2l_cancel_map,
+                    stash,
+                )
+                .await;
+                if let Err(e) = r {
+                    res = Err(e);
+                }
+            }
+        }
+    }
+
+    res
+}
