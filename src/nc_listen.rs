@@ -108,6 +108,23 @@ pub async fn from_nc_all(
     Ok(top_entry)
 }
 
+pub async fn from_nc_all_in_the_middle(
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+    target: &str,
+) -> Result<ArcEntry> {
+    let target = add_head_slash(&target);
+    let top_entry = from_nc(nc_info, local_info, &target).await?;
+    let top_entry = Arc::new(Mutex::new(top_entry));
+
+    const RE_REMOVE_CHILDPART: Lazy<Regex> = Lazy::new(|| Regex::new("^(.*/)[^/]+$").unwrap());
+    let p_str: &str = &RE_REMOVE_CHILDPART.replace(&target, "$1");
+
+    get_children_rec(nc_info, local_info, &top_entry, p_str).await?;
+
+    Ok(top_entry)
+}
+
 #[async_recursion]
 async fn get_children_rec(
     nc_info: &NCInfo,
@@ -451,6 +468,12 @@ fn remove_entry(path: &str, stash: bool, local_info: &LocalInfo) -> Result<()> {
     Ok(())
 }
 
+fn check_local_entry_is_dir(path: &str, local_info: &LocalInfo) -> bool {
+    let path = format!("{}{}", local_info.root_path, path);
+
+    Path::new(&path).is_dir()
+}
+
 #[async_recursion(?Send)]
 pub async fn init_local_entries(
     nc_info: &NCInfo,
@@ -633,41 +656,58 @@ pub async fn get_ncevents(
     // let client = Client::builder().https_only(true).build()?;
     let ref client = local_info.req_client;
 
-    let res = client
-        .request(Method::GET, url.as_str())
-        .query(&[
-            ("since", nc_state.latest_activity_id.to_string().as_str()),
-            ("sort", "asc"),
-        ])
-        .basic_auth(&nc_info.username, Some(&nc_info.password))
-        .header("OCS-APIRequest", "true")
-        .send()
-        .await?;
+    let mut latest_activity_id = nc_state.latest_activity_id.to_string();
+    let mut responses = vec![];
+    let mut err = None;
+    loop {
+        let res = client
+            .request(Method::GET, url.as_str())
+            .query(&[("since", latest_activity_id.as_str()), ("sort", "asc")])
+            .basic_auth(&nc_info.username, Some(&nc_info.password))
+            .header("OCS-APIRequest", "true")
+            .send()
+            .await?;
 
-    let s = res.status();
-    if !s.is_success() {
-        if s.as_u16() == 304 {
-            return Ok(vec![]);
-        } else {
-            return Err(BadStatusError(s.as_u16()).into());
+        let s = res.status();
+        if !s.is_success() {
+            if s.as_u16() != 304 {
+                err = Some(Err(BadStatusError(s.as_u16()).into()));
+            }
+            break;
+            /*
+            if s.as_u16() == 304 {
+                return Ok(vec![]);
+            } else {
+                return Err(BadStatusError(s.as_u16()).into());
+            }
+            */
         }
+
+        latest_activity_id = res
+            .headers()
+            .get("X-Activity-Last-Given")
+            .with_context(|| format!("Can't get latest activity id."))
+            .and_then(|v| v.to_str().with_context(|| "Can't get latest activity id."))
+            .map(|v| v.to_string())?;
+
+        let text = res.text_with_charset("utf-8").await?;
+
+        let document: roxmltree::Document<'_> = roxmltree::Document::parse(&text)?;
+        let mut r = ncevents_xml2responses(&document, nc_info, local_info).await?;
+        responses.append(&mut r);
     }
 
-    let latest_activity_id = res
-        .headers()
-        .get("X-Activity-Last-Given")
-        .with_context(|| format!("Can't get latest activity id."))
-        .and_then(|v| v.to_str().with_context(|| "Can't get latest activity id."))
-        .map(|v| v.to_string())?;
+    if_chain! {
+        if let Some(e) = err;
+        if latest_activity_id == "";
+        then {
+            e
+        } else {
+            nc_state.latest_activity_id = latest_activity_id;
 
-    let text = res.text_with_charset("utf-8").await?;
-
-    let document: roxmltree::Document<'_> = roxmltree::Document::parse(&text)?;
-    let responses = ncevents_xml2responses(&document, nc_info, local_info).await?;
-
-    nc_state.latest_activity_id = latest_activity_id;
-
-    Ok(responses)
+            Ok(responses)
+        }
+    }
 }
 
 static RE_FILE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^file.*").unwrap());
@@ -1114,31 +1154,68 @@ where
     }
 
     let target_str = path2str(target_path);
+    debug!("refresh beep {:?}", target_str);
+    const RE_REMOVE_CHILDPART: Lazy<Regex> = Lazy::new(|| Regex::new("^(.*)/[^/]+$").unwrap());
+    let p_str: &str = &RE_REMOVE_CHILDPART.replace(&target_str, "$1");
 
-    let target_entry = if_chain! {
-        if let Ok(Some(w)) = Entry::get(root, &target_str);
+    let parent_entry = if_chain! {
+        if let Ok(Some(w)) = Entry::get(root, p_str);
         if let Some(entry) = w.upgrade();
         then {
             entry
         } else {
-            info!("[refresh] no such entry: {:?}", target_str);
+            info!("[refresh] no such parent: {:?}", p_str);
             return Ok(());
         }
     };
+
+    let target_entry = from_nc_all_in_the_middle(nc_info, local_info, &target_str).await?;
+    Entry::append_child(&parent_entry, target_entry.clone())?;
 
     let is_file = {
         let entry = target_entry.lock().map_err(|_| LockError)?;
         entry.type_.is_file()
     };
 
+    // If app had failed to get the file and the dir made instead.
+    // It must repaired.
+    // but this code section is not nessesary.
+    // because thanks to the above code, new relary_entry is already gotten.
+    /*
+    if !is_file {
+        let realy_entry = from_nc(nc_info, local_info, &target_str).await;
+        if_chain! {
+            if let Ok(r_entry) = realy_entry;
+            if r_entry.type_.is_file();
+            then {
+                info!("fix type_ field of {:?}.", target_path);
+                let mut entry = target_entry.lock().map_err(|_| LockError)?;
+                entry.type_ = r_entry.type_;
+                entry.clear_children_because_wrong_type();
+                // remove_entry(&target_str, false, local_info)?;
+
+                is_file = true;
+            }
+        }
+    }
+    */
+
     if is_file {
+        remove_entry(&target_str, stash, local_info)?;
+
         {
             let mut entry = target_entry.lock().map_err(|_| LockError)?;
-            download_file_raw(nc_info, local_info, &mut entry, &target_str, stash).await?;
+            // already stashed pre-process.
+            download_file_raw(nc_info, local_info, &mut entry, &target_str, false).await?;
         }
         let counter = nc2l_cancel_map.entry(target_str).or_insert(0);
         *counter += 1;
     } else {
+        if !check_local_entry_is_dir(&target_str, local_info) {
+            remove_entry(&target_str, true, local_info)?;
+            touch_entry(&target_str, false, local_info)?;
+        }
+
         let children = {
             let entry = target_entry.lock().map_err(|_| LockError)?;
             entry.get_all_children()
@@ -1186,13 +1263,21 @@ async fn refresh_rec(
     let target_str = format!("{}/{}", parent_str, name);
 
     if is_file {
+        remove_entry(&target_str, stash, local_info)?;
+
         {
             let mut entry = target_entry.lock().map_err(|_| LockError)?;
-            download_file_raw(nc_info, local_info, &mut entry, &target_str, stash).await?;
+            // already stashed pre-process.
+            download_file_raw(nc_info, local_info, &mut entry, &target_str, false).await?;
         }
         let counter = nc2l_cancel_map.entry(target_str).or_insert(0);
         *counter += 1;
     } else if is_recursive {
+        if !check_local_entry_is_dir(&target_str, local_info) {
+            remove_entry(&target_str, true, local_info)?;
+            touch_entry(&target_str, false, local_info)?;
+        }
+
         let children = {
             let entry = target_entry.lock().map_err(|_| LockError)?;
             entry.get_all_children()

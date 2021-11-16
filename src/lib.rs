@@ -248,6 +248,13 @@ impl Entry {
         Ok(())
     }
 
+    // すんごく今更ですがなんで私は最終的にtype_とchildrenを分ける設計にしたのでしょうか...アホか
+    pub fn clear_children_because_wrong_type(&mut self) {
+        if self.type_.is_file() {
+            self.children = HashMap::new();
+        }
+    }
+
     pub fn get_child(&self, child_name: &str) -> Option<WeakEntry> {
         const RE_LAST_ITEM: Lazy<Regex> = Lazy::new(|| Regex::new(r".*?([^/\\]*)$").unwrap());
 
