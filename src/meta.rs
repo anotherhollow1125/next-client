@@ -118,9 +118,12 @@ pub struct LocalInfo {
     pub exc_checker: meta::ExcludeChecker,
     log_file_name: String,
     pub req_client: reqwest::Client,
+    pub autostash_keep_span: u32,
 }
 
 impl LocalInfo {
+    const AUTOSTASH_KEEP_SPAN_DEFAULT: u32 = 7;
+
     pub fn new(root_path: String, req_client: reqwest::Client) -> Result<Self> {
         let root_path = drop_slash(&root_path, &RE_HAS_LAST_SLASH);
         let root_path_cano = Path::new(&root_path).canonicalize()?;
@@ -133,7 +136,13 @@ impl LocalInfo {
             exc_checker,
             log_file_name,
             req_client,
+            autostash_keep_span: Self::AUTOSTASH_KEEP_SPAN_DEFAULT,
         })
+    }
+
+    pub fn set_autostash_keep_span(&mut self, span: u32) {
+        debug!("set autostash keep span to {}", span);
+        self.autostash_keep_span = span;
     }
 
     pub fn get_metadir_name(&self) -> String {
@@ -150,6 +159,15 @@ impl LocalInfo {
 
     pub fn get_stashpath_name(&self) -> String {
         format!("{}stash", self.get_metadir_name())
+    }
+
+    pub fn get_autostashpath_name(&self) -> String {
+        format!("{}autostash", self.get_metadir_name())
+    }
+
+    pub fn get_autostashpath_name_with_date(&self) -> String {
+        let dt = Local::now();
+        format!("{}/{}", self.get_autostashpath_name(), dt.format("%Y%m%d"))
     }
 
     pub fn get_logfile_name(&self) -> String {

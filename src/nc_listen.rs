@@ -429,8 +429,7 @@ fn save_file<R: io::Read + ?Sized>(
     stash: bool,
 ) -> Result<()> {
     let filename = format!("{}{}", local_info.root_path, path);
-    let stash = if stash { Some(local_info) } else { None };
-    fileope::save_file(r, &filename, stash)?;
+    fileope::save_file(r, &filename, stash, local_info)?;
 
     Ok(())
 }
@@ -452,18 +451,14 @@ fn touch_entry(path: &str, is_file: bool, local_info: &LocalInfo) -> Result<()> 
 fn move_entry(from_path: &str, to_path: &str, stash: bool, local_info: &LocalInfo) -> Result<()> {
     let from_path = format!("{}{}", local_info.root_path, from_path);
     let to_path = format!("{}{}", local_info.root_path, to_path);
-    fileope::move_entry(
-        from_path,
-        to_path,
-        if stash { Some(local_info) } else { None },
-    )?;
+    fileope::move_entry(from_path, to_path, stash, local_info)?;
 
     Ok(())
 }
 
 fn remove_entry(path: &str, stash: bool, local_info: &LocalInfo) -> Result<()> {
     let path = format!("{}{}", local_info.root_path, path);
-    fileope::remove_entry(path, if stash { Some(local_info) } else { None })?;
+    fileope::remove_entry(path, stash, local_info)?;
 
     Ok(())
 }
@@ -1064,11 +1059,11 @@ pub async fn nclistening(
 
         let dt = chrono::Local::now();
         let timestamp = dt.format("%Y-%m-%d %H:%M:%S").to_string();
-        fileope::save_file(
-            &mut timestamp.as_bytes(),
-            local_info.get_keepalive_filename().as_str(),
-            None,
-        )?;
+
+        let mut contents = timestamp.as_bytes();
+        let filename = local_info.get_keepalive_filename();
+        let mut out = std::fs::File::create(&filename)?;
+        io::copy(&mut contents, &mut out)?;
 
         if !network::check(&tx, nc_info, &local_info.req_client).await? {
             sleep(Duration::from_secs(10)).await;

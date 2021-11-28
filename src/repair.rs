@@ -157,7 +157,7 @@ fn check_exists_rec(
             }
 
             if local_path.is_file() {
-                fileope::remove_entry(&local_path, Some(local_info))?;
+                fileope::remove_entry(&local_path, true, local_info)?;
                 fileope::create_dir_all(&local_path)?;
                 have_to_cancel = true;
             }
@@ -252,7 +252,7 @@ fn choose_leave_dirfile_rec(
             }
 
             if local_path.is_file() {
-                fileope::remove_entry(&local_path, Some(local_info))?;
+                fileope::remove_entry(&local_path, true, local_info)?;
                 fileope::create_dir_all(&local_path)?;
             }
 
@@ -276,7 +276,7 @@ fn choose_leave_dirfile_rec(
                 }
 
                 if entry.get_child(&c_name).is_none() {
-                    fileope::remove_entry(&child_path, Some(local_info))?;
+                    fileope::remove_entry(&child_path, true, local_info)?;
                 }
             }
 
@@ -309,7 +309,7 @@ pub fn all_delete(local_info: &LocalInfo) -> Result<()> {
         .filter_map(|e| e.map(|e| e.path()).ok())
         .collect::<Vec<_>>();
 
-    fileope::remove_items(&entries, None)?;
+    fileope::remove_items(&entries, false, local_info)?;
 
     Ok(())
 }
