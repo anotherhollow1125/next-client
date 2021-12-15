@@ -998,6 +998,9 @@ async fn update_tree(
                     }
                     Ok(_) => {
                         debug!("try_fix_entry_type@move");
+                        fix_entry_type_rec(&target, &mut download_targets, nc_info, local_info)
+                            .await?;
+                        /*
                         let path = Entry::get_path(&target)?;
                         let have_to_download =
                             try_fix_entry_type(&target, &path, nc_info, local_info).await?;
@@ -1005,12 +1008,42 @@ async fn update_tree(
                             let w = Arc::downgrade(&target);
                             download_targets.push(w);
                         }
+                        */
                     }
                 }
             }
         }
     }
     Ok(download_targets)
+}
+
+#[async_recursion]
+async fn fix_entry_type_rec(
+    target: &ArcEntry,
+    download_targets: &mut Vec<WeakEntry>,
+    nc_info: &NCInfo,
+    local_info: &LocalInfo,
+) -> Result<()> {
+    let path = Entry::get_path(&target)?;
+    let have_to_download = try_fix_entry_type(&target, &path, nc_info, local_info).await?;
+    if have_to_download {
+        let w = Arc::downgrade(&target);
+        download_targets.push(w);
+    }
+    let (is_dir, children) = {
+        let target_ref = target.lock().map_err(|_| LockError)?;
+        (target_ref.type_.is_dir(), target_ref.get_all_children())
+    };
+    if is_dir {
+        for child in children {
+            if let Some(child) = child.upgrade() {
+                let e = fix_entry_type_rec(&child, download_targets, nc_info, local_info).await;
+                debug!("{:?}", e);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn try_fix_entry_type(
@@ -1041,6 +1074,7 @@ async fn try_fix_entry_type(
 
     debug!("{}", path);
     remove_entry(&path, false, local_info)?;
+    debug!("removed. will touch");
     touch_entry(&path, target_ref.type_.is_file(), local_info)?;
 
     Ok(target_ref.type_.is_file())
@@ -1089,7 +1123,6 @@ pub async fn update_and_download(
     l2nc_cancel_set: &mut HashSet<NCEvent>,
     stash: bool,
 ) -> Result<()> {
-    let mut nc2l_cancel_targets = Vec::new();
     let events = events
         .into_iter()
         .filter(|ev| !l2nc_cancel_set.remove(ev))
@@ -1104,20 +1137,24 @@ pub async fn update_and_download(
                     continue;
                 }
             }
-            let target_path = download_file_with_check_etag(nc_info, local_info, &e, stash).await?;
+            debug!("download target: {:?}", e);
+            let r = download_file_with_check_etag(nc_info, local_info, &e, stash).await;
+            let target_path = match r {
+                Ok(path) => path,
+                Err(e) => {
+                    warn!("{:?}", e);
+                    continue;
+                }
+            };
             {
                 let mut e_ref = e.lock().map_err(|_| LockError)?;
                 e_ref.status = EntryStatus::UpToDate;
             }
-            if let Some(p) = target_path {
-                nc2l_cancel_targets.push(p);
+            if let Some(item) = target_path {
+                let counter = nc2l_cancel_map.entry(item).or_insert(0);
+                *counter += 1;
             }
         }
-    }
-
-    for item in nc2l_cancel_targets {
-        let counter = nc2l_cancel_map.entry(item).or_insert(0);
-        *counter += 1;
     }
 
     Ok(())

@@ -19,14 +19,14 @@ pub fn save_file<R: io::Read + ?Sized>(
 
     let p = path::Path::new(filename);
     if p.exists() {
-        autostash_item(p, local_info)?;
+        autostash_item(p, local_info).map_err(|e| anyhow!("{:?} | {:?}", filename, e))?;
         if use_stash {
-            stash_item(p, local_info)?;
+            stash_item(p, local_info).map_err(|e| anyhow!("{:?} | {:?}", filename, e))?;
         }
     }
 
-    let mut out = fs::File::create(filename)?;
-    io::copy(r, &mut out)?;
+    let mut out = fs::File::create(filename).map_err(|e| anyhow!("{:?} | {:?}", filename, e))?;
+    io::copy(r, &mut out).map_err(|e| anyhow!("{:?} | {:?}", filename, e))?;
 
     Ok(())
 }
@@ -37,7 +37,7 @@ where
 {
     debug!("create_dir_all: {:?}", dir_path);
 
-    fs::create_dir_all(dir_path)?;
+    fs::create_dir_all(&dir_path).map_err(|e| anyhow!("{:?} | {:?}", dir_path, e))?;
 
     Ok(())
 }
@@ -52,10 +52,11 @@ where
         fs::OpenOptions::new()
             .create(true)
             .write(true)
-            .open(path)
-            .map(|_| ())?;
+            .open(&path)
+            .map(|_| ())
+            .map_err(|e| anyhow!("{:?} | {:?}", path, e))?;
     } else {
-        create_dir_all(path)?;
+        create_dir_all(&path)?;
     }
 
     Ok(())
@@ -77,9 +78,11 @@ where
         if to_path.as_ref().exists();
         if to_path.as_ref().is_file();
         then {
-            autostash_item(&to_path, local_info)?;
+            autostash_item(&to_path, local_info)
+                .map_err(|e| anyhow!("{:?} | {:?}", to_path, e))?;
             if use_stash {
-                stash_item(&to_path, local_info)?;
+                stash_item(&to_path, local_info)
+                    .map_err(|e| anyhow!("{:?} | {:?}", to_path, e))?;
             }
         }
     }
@@ -89,7 +92,8 @@ where
         copy_inside: true,
         ..Default::default()
     };
-    fs_extra::move_items(&[from_path], to_path, &options)?;
+    fs_extra::move_items(&[&from_path], &to_path, &options)
+        .map_err(|e| anyhow!("{:?}->{:?} | {:?}", from_path, to_path, e))?;
 
     Ok(())
 }
@@ -98,17 +102,21 @@ pub fn remove_entry<T>(path: T, use_stash: bool, local_info: &LocalInfo) -> Resu
 where
     T: AsRef<path::Path> + Debug,
 {
-    debug!("remove_entry: {:?}", path);
+    debug!(
+        "remove_entry: {:?} (is_dir: {:?})",
+        path,
+        path.as_ref().is_dir()
+    );
     if !path.as_ref().exists() {
         return Ok(());
     }
 
-    autostash_item(&path, local_info)?;
+    autostash_item(&path, local_info).map_err(|e| anyhow!("{:?} | {:?}", path, e))?;
     if use_stash {
-        stash_item(&path, local_info)?;
+        stash_item(&path, local_info).map_err(|e| anyhow!("{:?} | {:?}", path, e))?;
     }
 
-    fs_extra::remove_items(&[path])?;
+    fs_extra::remove_items(&[&path]).map_err(|e| anyhow!("{:?} | {:?}", path, e))?;
 
     Ok(())
 }
@@ -121,14 +129,14 @@ where
 
     for path in paths.iter() {
         if path.as_ref().exists() {
-            autostash_item(&path, local_info)?;
+            autostash_item(&path, local_info).map_err(|e| anyhow!("{:?} | {:?}", path, e))?;
             if use_stash {
-                stash_item(&path, local_info)?;
+                stash_item(&path, local_info).map_err(|e| anyhow!("{:?} | {:?}", path, e))?;
             }
         }
     }
 
-    fs_extra::remove_items(paths)?;
+    fs_extra::remove_items(paths).map_err(|e| anyhow!("{:?} | {:?}", paths, e))?;
 
     Ok(())
 }
@@ -241,6 +249,7 @@ where
         let target_path = stash_folder.join(name);
         fs::copy(path, target_path)?;
     } else {
+        // let target_path = stash_folder.join(name);
         fs_extra::copy_items(
             &[&path],
             &stash_folder,
@@ -250,10 +259,13 @@ where
                 ..Default::default()
             },
         )?;
-        let from_path = stash_folder.join(original_name);
+        let from_path = stash_folder.join(
+            p_ref
+                .file_name()
+                .ok_or_else(|| anyhow!("{:?} | invalid dir", p_ref))?,
+        );
         let target_path = stash_folder.join(name);
-
-        fs::rename(from_path, target_path)?;
+        fs::rename(&from_path, &target_path)?;
     }
 
     Ok(())
